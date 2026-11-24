@@ -67,6 +67,19 @@ internal fun SettingsUiRegistryBuilder.registerPlaybackSettings(host: SharedSett
                 ) {
                     settings.castEnabled = it
                 }
+                if (host.platform == SettingsPlatform.ANDROID) {
+                    inlineSlider(
+                        id = "castVolumeStep",
+                        title = stringResource(Res.string.cast_volume_step),
+                        description = stringResource(Res.string.cast_volume_step_description),
+                        valueLabel = "${settings.castVolumeStep}${stringResource(Res.string.percent_symbol)}",
+                        value = settings.castVolumeStep.toFloat(),
+                        defaultValue = settings.defaultValue(settings::castVolumeStep).toFloat(),
+                        range = 1f..10f,
+                        steps = 8,
+                        enabled = settings.castEnabled,
+                    ) { settings.castVolumeStep = it.roundToInt() }
+                }
             }
         }
         group("audio", stringResource(Res.string.general)) {
@@ -319,6 +332,19 @@ internal fun SettingsUiRegistryBuilder.registerPlaybackSettings(host: SharedSett
                 checked = settings.autoLoadMore,
             ) { settings.autoLoadMore = it }
             switch(
+                id = "classicRecommendations",
+                title = stringResource(Res.string.classic_recommendations),
+                description =
+                    stringResource(
+                        if (host.platform == SettingsPlatform.DESKTOP) {
+                            Res.string.classic_recommendations_desc_desktop
+                        } else {
+                            Res.string.classic_recommendations_desc
+                        },
+                    ),
+                checked = settings.classicRecommendations,
+            ) { settings.classicRecommendations = it }
+            switch(
                 id = "rememberShuffleRepeat",
                 title = stringResource(Res.string.remember_shuffle_and_repeat),
                 description = stringResource(Res.string.remember_shuffle_and_repeat_desc),
@@ -335,13 +361,18 @@ internal fun SettingsUiRegistryBuilder.registerPlaybackSettings(host: SharedSett
                     settings.autoDownloadOnLike = enabled
                 }
             }
-            // Only Android downloads a whole album or playlist when it is saved.
-            if (host.platform == SettingsPlatform.ANDROID) {
+            if (host.platform != SettingsPlatform.IOS) {
                 switch(
                     id = "autoDownloadSavedCollections",
                     title = stringResource(Res.string.auto_download_saved_collections),
                     checked = settings.autoDownloadSavedCollections,
-                ) { enabled -> host.onSettingChanged(SettingsChangeEffect.AUTO_DOWNLOAD_SAVED_COLLECTIONS, enabled) }
+                ) { enabled ->
+                    if (host.platform == SettingsPlatform.ANDROID) {
+                        host.onSettingChanged(SettingsChangeEffect.AUTO_DOWNLOAD_SAVED_COLLECTIONS, enabled)
+                    } else {
+                        settings.autoDownloadSavedCollections = enabled
+                    }
+                }
             }
         }
         if (host.platform != SettingsPlatform.DESKTOP) {
@@ -355,6 +386,12 @@ internal fun SettingsUiRegistryBuilder.registerPlaybackSettings(host: SharedSett
                     ) {
                         settings.stopMusicOnTaskClear = it
                     }
+                    switch(
+                        id = "resumeOnBluetoothConnect",
+                        title = stringResource(Res.string.resume_on_bluetooth_connect),
+                        description = stringResource(Res.string.resume_on_bluetooth_connect_desc),
+                        checked = settings.resumeOnBluetoothConnect,
+                    ) { settings.resumeOnBluetoothConnect = it }
                 }
                 switch(
                     id = "pauseOnMute",

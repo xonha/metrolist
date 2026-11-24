@@ -438,7 +438,10 @@ class DeviceConnectRemote(
         startingDefaultPlayback = false
         port?.setExternalReportingEnabled(enabled = false, session = null)
         port?.setAudioOutputEnabled(false)
-        port?.setControllerPlayback((snapshot?.playback ?: DcLocalPlaybackState()).copy(positionMs = snapshot?.playback?.positionMs ?: 0L))
+        port?.setControllerPlayback(
+            (snapshot?.playback ?: DcLocalPlaybackState()).copy(positionMs = snapshot?.playback?.positionMs ?: 0L),
+            provisional = true,
+        )
         startPendingTimeout(deviceId)
     }
 
@@ -629,6 +632,7 @@ class DeviceConnectRemote(
         canonical = adopted
         controllers += peerId
         publishState()
+        if (adopted.playback.explicitRadioQueue && adopted.playback.queue.displayedItems.size == 1) port?.onExplicitRadioRequest()
         applyCanonical(adopted, seek = true)
         broadcastSnapshot()
     }
@@ -646,7 +650,10 @@ class DeviceConnectRemote(
         playback?.setControllerPlayback(null)
         playback?.setExternalReportingEnabled(enabled = true, session = snapshot.playback.scrobbleSession)
         playback?.setAudioOutputEnabled(true)
-        if (playback != null) playback.apply(snapshot, snapshot.playback.positionMs) { port === playback && !isActive }
+        if (playback != null) {
+            if (snapshot.playback.explicitRadioQueue && snapshot.playback.queue.displayedItems.size == 1) playback.onExplicitRadioRequest()
+            playback.apply(snapshot, snapshot.playback.positionMs) { port === playback && !isActive }
+        }
     }
 
     private suspend fun handlePull(
@@ -698,7 +705,11 @@ class DeviceConnectRemote(
     ) {
         val current = canonical ?: return
         if ((command.isQueueIndexed() && expectedQueue != current.queueRevision) ||
-            (command.action == DcPlaybackAction.REPLACE_CURRENT && command.expectedTrackRevision != current.trackRevision)
+            (command.action == DcPlaybackAction.REPLACE_CURRENT && command.expectedTrackRevision != current.trackRevision) ||
+            (
+                command.action == DcPlaybackAction.REMOVE && command.expectedTrackRevision != null &&
+                    command.expectedTrackRevision != current.trackRevision
+            )
         ) {
             commandError(sender, DcSyncError.STALE_QUEUE)
             if (sender != localDeviceId()) sendSnapshot(sender)
@@ -711,7 +722,9 @@ class DeviceConnectRemote(
                 return
             }
         val playback = if (change.playback.queue === current.playback.queue) change.playback else wireQueueCache.sanitize(change.playback)
-        val queueChanged = !sameDcQueue(current.playback.queue, playback.queue)
+        val queueChanged =
+            !sameDcQueue(current.playback.queue, playback.queue) ||
+                current.playback.explicitRadioQueue != playback.explicitRadioQueue
         if (!(if (queueChanged) validDcPlayback(playback) else validDcPlaybackScalars(playback))) {
             commandError(sender, DcSyncError.INVALID_MESSAGE)
             return
@@ -738,6 +751,7 @@ class DeviceConnectRemote(
             val target = port ?: return commandError(sender, DcSyncError.UNAVAILABLE)
             target.setVolume(playback.volume)
         }
+        if (command.action == DcPlaybackAction.REPLACE_QUEUE && command.explicitRadioQueue) port?.onExplicitRadioRequest()
         canonical = updated
         publishState()
         if (command.action != DcPlaybackAction.VOLUME) applyCanonical(updated, seek = seek)

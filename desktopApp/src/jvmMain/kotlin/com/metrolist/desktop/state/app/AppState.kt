@@ -7,11 +7,15 @@ package com.metrolist.desktop.state.app
 
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.SnackbarResult
+import androidx.compose.ui.ExperimentalComposeUiApi
+import androidx.compose.ui.platform.ClipEntry
+import androidx.compose.ui.platform.Clipboard
 import com.metrolist.desktop.state.content.SearchState
 import com.metrolist.desktop.update.DesktopUpdateManager
 import com.metrolist.desktop.update.GitHubDesktopRelease
 import com.metrolist.desktop.update.desktopUpdateCheckIsDue
 import com.metrolist.desktop.utils.AppLogger
+import com.metrolist.desktop.utils.WaylandScale
 import com.metrolist.shared.api.artwork.AnimatedArtworkService
 import com.metrolist.shared.api.artwork.DirectCanvasProvider
 import com.metrolist.shared.discord.DiscordRpcManager
@@ -24,6 +28,8 @@ import com.metrolist.shared.generated.resources.updates_title
 import com.metrolist.shared.settings.Settings
 import com.metrolist.shared.state.GlobalYouTube
 import com.metrolist.shared.ui.settings.SettingsPageId
+import com.metrolist.shared.update.UPDATE_CHANNEL_NIGHTLY
+import com.metrolist.shared.update.UPDATE_CHANNEL_STABLE
 import com.metrolist.shared.utils.OsUtil
 import com.metrolist.shared.utils.tryOpenUrl
 import dev.nucleusframework.share.ShareException
@@ -77,6 +83,17 @@ object AppState {
         UiState.canInstallUpdate = UiState.availableUpdate?.let { DesktopUpdateManager.canInstall(it) } == true
     }
 
+    fun setFollowNightlyUpdates(enabled: Boolean) {
+        Settings.shared.updateChannel = if (enabled) UPDATE_CHANNEL_NIGHTLY else UPDATE_CHANNEL_STABLE
+        if (!enabled && UiState.availableUpdate?.isNightly == true) {
+            // The next check may fail or already be running; the old offer is no longer eligible.
+            UiState.availableUpdate = null
+            UiState.canInstallUpdate = false
+            UiState.updateDownloadError = null
+        }
+        checkForUpdates()
+    }
+
     fun checkForUpdates(notify: Boolean = false) {
         if (UiState.isCheckingForUpdates || UiState.isDownloadingUpdate || UiState.updateManagerStarted) return
         UiState.isCheckingForUpdates = true
@@ -118,7 +135,29 @@ object AppState {
         }
     }
 
+    @Volatile
+    private var activeClipboard: Clipboard? = null
+
+    internal fun bindClipboard(clipboard: Clipboard) {
+        activeClipboard = clipboard
+    }
+
+    internal fun unbindClipboard(clipboard: Clipboard) {
+        if (activeClipboard === clipboard) activeClipboard = null
+    }
+
+    @OptIn(ExperimentalComposeUiApi::class)
     fun copyToClipboard(text: String) {
+        val composeClipboard = activeClipboard
+        if (WaylandScale.isNativeWaylandActive() && composeClipboard != null) {
+            scope.launch {
+                runCatching {
+                    composeClipboard.setClipEntry(ClipEntry(StringSelection(text)))
+                    snackbarHostState.showSnackbar(getString(Res.string.copied))
+                }
+            }
+            return
+        }
         try {
             val sel = StringSelection(text)
             Toolkit.getDefaultToolkit().systemClipboard.setContents(sel, sel)

@@ -117,6 +117,7 @@ enum class FontOption {
     INTER,
     GOOGLE_SANS,
     MAPLE_MONO,
+    CUSTOM,
 }
 
 enum class AnimatedCoverResolution {
@@ -196,3 +197,5 @@ enum class GridItemSize {
     BIG,
     SMALL,
 }
+
+enum class SongShareLink { YOUTUBE_MUSIC, SONG_LINK }

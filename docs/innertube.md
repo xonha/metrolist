@@ -11,11 +11,22 @@ For dependency development, choose one substitution:
 
 These flags do not alter hosted pins. QuackJS handles signature and throttling transforms separately from PO-token attestation.
 
+## Content locale
+
+`GlobalYouTube.contentLocale` retains the resolved content language, including region and script subtags. Shazam, Paxsenix lyrics, subtitle preferences and Last.fm use it. Subtitle selection tries the exact tag, then its primary language, while preserving the preference for manual captions over automatic captions. Saved `lastResolvedContentLanguage` also retains this tag for artwork and artist lookups.
+
+When YouTube Music does not serve the system region, `closestContentCountry` picks the alphabetically first served region with a locale in the same language, preferring the same script. If no served region uses that language, it sends `US`, as the maintainer decided in [#5150](https://github.com/MetrolistGroup/Metrolist/issues/5150).
+
+Only the InnerTube locale maps the language to a YouTube-accepted `hl`, trying the full tag, its first two subtags and then the primary language. The isolated song-details request applies the same mapping. YouTube response date parsing, Home cache signatures, playback diagnostics and search suggestions use the request locale. Discord labels and display number/date formats use the app or system locale.
+
+If no tag is accepted, `hl` is blank and InnerTubeX v0.13.1 or later leaves it out of the request context, so YouTube picks the language from the IP address and request headers.
+
 ## Pagination
 
 App callers use `shared/src/commonMain/kotlin/com/metrolist/shared/api/YouTubeRepository.kt`.
 
 - Playlist page flows are cold and emit deltas without prefetch. `first()` must not request continuations. Resume from the saved cursor and preserve duplicates by song ID plus playlist occurrence ID.
+- Generated mix continuations have no final page. Whole-playlist actions use the loaded pages as a finite snapshot, and a cache refresh replaces the previous batch. Normal playlists and albums still load every page.
 - Consumers sharing a playlist cursor reuse successful deltas. Failure or cancellation leaves it retryable. Keep account/session checks around reused results.
 - Podcast pagination follows distinct continuation branches and deduplicates episode IDs. Retain sibling tokens and failed cursors. Whole-podcast actions need every episode.
 - Interactive browse/Home shelf loaders request first pages with `loadAllPages = false`. Resume shelf cursors before outer cursors, preserve response order and retain failures for retry.
@@ -23,6 +34,8 @@ App callers use `shared/src/commonMain/kotlin/com/metrolist/shared/api/YouTubeRe
 - Playlist queues finish continuations before recommendations. Full-queue consumers, including synchronized playback, need complete snapshots. Respect cancellation and Auto load more when accepting in-flight results.
 
 Artist failures retain available offline data. Without it, propagate the original error and log the response stage/status without bodies or credentials.
+
+Greyed browse rows with a title and duration remain eligible for playback, including rows whose title opens a Premium dialog. That restriction describes the browse client; the stream resolver can try other clients. Deleted and private placeholders without playable metadata stay unavailable.
 
 ## Search
 
@@ -38,11 +51,15 @@ Home projects API renderers through shared models. Preserve shelf order, header 
 
 Home shelf pages use two columns for collections and artists, full-width 16:9 cards for video shelves, and rows for songs or mixed content. They retain the shelf items while loading its continuation or browse endpoint. Android and the shared mobile host retain page loaders with their navigation entries; paging failures keep the cursor for retry. Page identity includes the feed endpoint, chip parameters and shelf identity. Shelf More endpoints take precedence over header links. Artist header links never replace shelf contents with an artist page; a filtered shelf without its own endpoint parameters or cursor shows its existing items.
 
+Quick picks reuses a source shelf's browse endpoint and continuation only when that shelf contains every displayed pick. Local recommendations that only overlap an API shelf keep their existing songs when expanded. Without an endpoint or continuation, the page ends without a network request. Songs present in the "Heard in Shorts" shelf are always excluded from Quick picks while remaining in the "Heard in Shorts" shelf when it is visible.
+
 Signed-in, unfiltered Home fetches only missing moods and genres from Explore after its last continuation. Existing main-feed moods skip that request. The moods shelf stays at the end of the main feed, before any separately appended feeds. No other Explore shelves enter signed-in Home.
 
 Mobile API library shelves show saved music albums while podcast shelves remain separate. Filter by browse ID and shared model type, never translated titles. Desktop excludes library/local-only sections under the [agent rule](../AGENTS.md#implementation-rules). Speed Dial is allowed.
 
 Home cache identity respects account, locale and browse policy. Visitor publication must pass InnerTubeX's session compatibility check before accepting an in-flight response.
+
+With Classic recommendations enabled, unfiltered Home Quick picks come from local listening history: songs related to recently played tracks plus a few forgotten favourites, stripped of blocked and non-musical entries before sampling. Filtered Home shelves and their continuations keep API-first selection. In unfiltered Classic mode, Home continuations retain the current Quick picks, using API picks only if the current list is empty. Restored snapshots rebuild picks for the current mode, falling back to the snapshot's saved picks when its shortened feed has no API shelf.
 
 Legacy settings migration and backup imports convert `SYSTEM_DEFAULT` and lowercase `system` to `SYSTEM` for app language, content language and content country. Invalid saved content languages and countries return to the system locale before requests, including settings already migrated to v14. Language validation uses the platform locale catalog and bundled resource tags. Imports also clear v13's literal `null` visitor data without discarding valid session values. Failed restores keep their exact settings snapshot.
 
@@ -68,7 +85,13 @@ A CDN 403 for an explicitly untokenized `_nopo` profile excludes that profile wi
 
 After a web-token rejection, audio requests try tokenless VISIONOS first. A failed probe continues through the normal clients. Video and YouTube canvas requests keep their video requirement and skip this audio-only preference.
 
+Android and desktop playback allow InnerTubeX's progressive transport, which iOS, downloads and canvas requests do not. `IOS_PRODUCER` needs no PO token, but YouTube only returns muxed 360p itag 18 for it, so selection tries it after every other healthy client. `PlaybackResource.isMuxedProgressive` keeps those files out of the persistent song caches, so a later play resolves a full-quality stream again.
+
+YouTube Music video canvas over SABR plays from the start only. Short-clip seeks and clip preparation stay disabled for SABR because mid-video requests often stay on protection status 2 with no media and fail as `ATTESTATION_REQUIRED`. Direct video canvas can still use short clips.
+
 Token callbacks keep request-local results. A canceled Kotlin caller does not cancel a WebView promise; late results cannot overwrite another request. Check this with `node --test scripts/test_page_bound_po_token.mjs`.
+
+With crash reporting enabled, `PlaybackClientStats` counts resolve outcomes per client profile and playback successes and failures by category. It stores only catalog profile IDs and counters, never video IDs. Every fifth launch Android and desktop send one Sentry log per profile and reset the counts; sum `playback.play.ok` and `playback.play.fail.*` by `playback.profile` in Sentry Logs to compare clients. iOS counts locally but does not send them yet.
 
 ## SABR
 
@@ -106,4 +129,4 @@ For signed-out runs, use `-DinnerTubeSignedOut=true`. Upload probes need a new f
 
 ## Backend verification
 
-Run affected [platform checks](checks.md#platform-checks). Relevant suites include `SabrInputStreamTest`, `SabrPlaybackStreamsTest`, `SabrAudioFetchTest`, `DefaultStreamResolverTest` and the repository/parser tests beside changed code. Fixture sources and limits are in [test fixtures](test-fixtures.md).
+Run affected [platform checks](checks.md#platform-checks). Relevant suites are the parser tests beside changed code. Fixture sources and limits are in [test fixtures](test-fixtures.md).

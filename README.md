@@ -1,6 +1,6 @@
 # Metrolist for Arch
 
-A personal fork of [Metrolist](https://github.com/MetrolistGroup/Metrolist) that builds a desktop package for Arch Linux x86_64, including Omarchy. It is based on Metrolist v14.0.1 and removes the Omarchy startup check.
+A personal fork of [Metrolist](https://github.com/MetrolistGroup/Metrolist) that builds a desktop package for Arch Linux x86_64, including Omarchy. It removes the Omarchy startup check. The default branch tracks upstream development. Stable packages are built from version branches, starting with [release/14.0.1](https://github.com/xonha/metrolist/tree/release/14.0.1).
 
 ## Install or update
 

@@ -96,6 +96,7 @@ internal fun List<SettingsGroupRegistration>.prioritized(page: SettingsPageId): 
                 SettingsPageId.PLAYER to "queue" -> {
                     listOf(
                         "autoLoadMore",
+                        "classicRecommendations",
                         "autoDownloadOnLike",
                         "autoDownloadSavedCollections",
                         "persistentQueue",
@@ -117,6 +118,7 @@ internal fun List<SettingsGroupRegistration>.prioritized(page: SettingsPageId): 
                         "hideVideoSongs",
                         "hideNonMusicalVideos",
                         "hidePodcasts",
+                        "hidePlaylistRecommendations",
                         "blockAiArtists",
                         "hideShortSongs",
                         "minimumDuration",

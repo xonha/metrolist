@@ -316,7 +316,26 @@ internal fun prepareQueueTracks(
 internal fun QueueTrack.durationText(
     isActive: Boolean,
     currentDuration: Long?,
-): String = formatQueueDuration(duration ?: currentDuration?.takeIf { isActive && it > 0L })
+): String = formatQueueDuration(duration?.takeIf { it > 0L } ?: currentDuration?.takeIf { isActive && it > 0L })
+
+internal fun queueTotalDuration(
+    items: List<PlayerViewModel.QueueItemUiModel>,
+    entryKeys: List<Long>,
+    currentQueueIndex: Int,
+    currentDuration: Long,
+): Long? {
+    var totalDuration = 0L
+    items.forEachIndexed { index, item ->
+        if (entryKeys[index] >= 0L) {
+            val duration =
+                item.duration?.takeIf { it > 0L }
+                    ?: currentDuration.takeIf { index == currentQueueIndex && it > 0L }
+                    ?: return null
+            totalDuration += duration
+        }
+    }
+    return totalDuration
+}
 
 internal fun QueueTrack.isReorderTarget(
     draggingEntryKey: Long?,
@@ -381,6 +400,7 @@ fun QueueScreen(
     var draggingEntryKey by remember { mutableStateOf<Long?>(null) }
     val isUnlocked = !Settings.shared.isQueueLocked
     val isTv = LocalIsTv.current
+    val swipeToRemoveWhenLocked = !isDesktopPanel && !isTv && Settings.shared.swipeToRemoveFromQueue
     val queueFocusRequester = remember { FocusRequester() }
     var tvMovement by remember { mutableStateOf(TvQueueMovement()) }
     var tvSelecting by remember { mutableStateOf(hasSelection) }
@@ -695,9 +715,11 @@ fun QueueScreen(
                                     } else {
                                         Modifier
                                     }
+                                val canSwipeRemove = track.canRemove && !hasSelection && canControlPlayback && !isDragging
                                 QueueTrackSwipeToDismissBox(
                                     trackKey = track.uniqueKey,
-                                    enabled = isUnlocked && track.canRemove && !hasSelection && canControlPlayback && !isDragging,
+                                    enableStartToEnd = isUnlocked && canSwipeRemove,
+                                    enableEndToStart = (isUnlocked || swipeToRemoveWhenLocked) && canSwipeRemove,
                                     onDismiss = {
                                         if (canControlPlayback) {
                                             onEvent(QueueEvent.RemoveTrack(track.entryKey))
@@ -819,9 +841,11 @@ fun QueueScreen(
                             ) { track ->
                                 val isActive = track.entryKey == state.currentEntryKey
                                 Box {
+                                    val canSwipeRemove = track.canRemove && !hasSelection && canControlPlayback
                                     QueueTrackSwipeToDismissBox(
                                         trackKey = track.uniqueKey,
-                                        enabled = isUnlocked && track.canRemove && !hasSelection && canControlPlayback,
+                                        enableStartToEnd = isUnlocked && canSwipeRemove,
+                                        enableEndToStart = (isUnlocked || swipeToRemoveWhenLocked) && canSwipeRemove,
                                         onDismiss = {
                                             if (canControlPlayback) {
                                                 onEvent(QueueEvent.RemoveTrack(track.entryKey))
@@ -1203,7 +1227,8 @@ private fun PlaylistHeader(
 @Composable
 private fun QueueTrackSwipeToDismissBox(
     trackKey: String,
-    enabled: Boolean,
+    enableStartToEnd: Boolean,
+    enableEndToStart: Boolean,
     onDismiss: () -> Unit,
     modifier: Modifier = Modifier,
     content: @Composable RowScope.() -> Unit,
@@ -1284,9 +1309,9 @@ private fun QueueTrackSwipeToDismissBox(
                 }
             }
         },
-        enableDismissFromStartToEnd = enabled,
-        enableDismissFromEndToStart = enabled,
-        gesturesEnabled = enabled,
+        enableDismissFromStartToEnd = enableStartToEnd,
+        enableDismissFromEndToStart = enableEndToStart,
+        gesturesEnabled = enableStartToEnd || enableEndToStart,
         onDismiss = { _ ->
             onDismiss()
         },
@@ -1723,15 +1748,7 @@ fun QueueScreen(
 
     val totalDuration =
         remember(uiState.queueItems, uiState.queueEntryKeys, uiState.currentQueueIndex, uiState.duration) {
-            val durations =
-                uiState.queueItems.mapIndexed { index, item ->
-                    if (uiState.queueEntryKeys[index] < 0) {
-                        0L
-                    } else {
-                        item.duration ?: uiState.duration.takeIf { index == uiState.currentQueueIndex && it > 0L }
-                    }
-                }
-            if (durations.any { it == null }) null else durations.filterNotNull().sumOf { it.coerceAtLeast(0L) }
+            queueTotalDuration(uiState.queueItems, uiState.queueEntryKeys, uiState.currentQueueIndex, uiState.duration)
         }
     val (queuedTracks, suggestedTracks) =
         remember(reorderableTracks, tracks) {

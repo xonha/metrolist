@@ -61,6 +61,8 @@ Collection margins are 16 dp in single-column layouts and 24 dp at the outer edg
 
 The Add to playlist chooser defaults to Library order, following the Playlists filter's sort and direction, including manual order and play time. Manual follows the saved library positions without reversing them. A saved picker sort overrides the default until the user chooses Library order.
 
+While signed out, the chooser also lists saved YouTube playlists after the selectable ones, greyed out and never selectable, so it can show which of them already contain the song. Their membership loads separately and never delays the dialog; a failed lookup shows no highlight.
+
 ## Selection mode and actions
 
 Album, playlist, auto-playlist and History selection replace the top row with `SelectionTopBar`; there is no floating bottom toolbar. Close, Select all and More stay in the header, and More opens the shared `SongSelectionMenuSheet`.
@@ -75,7 +77,6 @@ Desktop song details use the shared draggable scrollbar when the content exceeds
 
 ## Verification
 
-`MediaMenuPlaybackActionsTest` covers ordered album/playlist playback, artist shuffle, shuffled duplicate occurrences, queue insertion, empty loads, failures and cancellation without a UI harness.
 
 Run affected [platform checks](checks.md#platform-checks). Compile and exercise iOS on macOS. Check each changed host with available and unavailable items, guests, local audio and duplicate queue entries. Compare song, album, artist, playlist, queue and player menus with and without a playing track, including missing album/artist IDs, like/dislike, download progress, alternate sharing and playlist picker dismissal. Test touch, mouse, TV focus, keyboard and screen-reader actions, dismissal, failed loading and native callbacks on the target platform.
 
@@ -84,3 +85,5 @@ Explicit-song headers must keep the badge visible after short, long and missing 
 For desktop placement, check right-click and button menus after scrolling, with the sidebar visible, at different display scales and near window edges. Right-click menus start at the cursor and stay inside the window; button menus leave the trigger visible. Check motion, scrolling, outside-click and Escape dismissal, keyboard activation, RTL and reduced motion.
 
 For collection headers and selection, check Liked Music, an empty playlist, a remote playlist, an editable playlist, an album, Downloads, Cache, History and Queue at phone, medium and two-pane widths, with long translations, large fonts, RTL and animations disabled.
+
+Lyric sharing offers a 9:16 story image styled with the active theme colors and a 1:1 square image that keeps its saved background mode and colors. Both include artwork and track metadata; the story footer adds a YouTube Music link only for remote tracks. The dialog also offers plain-text sharing. Verify both formats, mobile share sheets, local songs and five selected lines.

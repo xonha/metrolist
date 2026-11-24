@@ -16,6 +16,7 @@ import com.metrolist.shared.generated.resources.Res
 import com.metrolist.shared.generated.resources.playback_unable_to_play_queued_track
 import com.metrolist.shared.model.SongItem
 import com.metrolist.shared.model.isVideoSong
+import com.metrolist.shared.playback.MusicQueueSnapshot
 import com.metrolist.shared.playback.PlaybackSeekSource
 import com.metrolist.shared.scrobble.ScrobbleManager
 import com.metrolist.shared.settings.Settings
@@ -27,6 +28,20 @@ import kotlinx.coroutines.withContext
 import org.jetbrains.compose.resources.getString
 import java.io.IOException
 import kotlin.math.abs
+
+internal fun shouldClearPersistedPlaybackForAppliedQueue(queue: MusicQueueSnapshot): Boolean = queue.displayedItems.isEmpty()
+
+internal fun shouldClearPersistedPlaybackForControllerState(
+    previous: DcLocalPlaybackState?,
+    next: DcLocalPlaybackState?,
+    provisional: Boolean,
+    provisionalClearPending: Boolean,
+): Boolean {
+    if (next == null || provisional || next.queue.displayedItems.isNotEmpty()) return false
+    // The first confirmed empty state can arrive without a provisional callback, such as when a port
+    // reattaches to an already empty canonical queue and replaces the restored local queue.
+    return provisionalClearPending || previous == null || previous.queue.displayedItems.isNotEmpty()
+}
 
 internal class AndroidDeviceConnectPlayback(
     private val context: Context,
@@ -41,6 +56,7 @@ internal class AndroidDeviceConnectPlayback(
     private val fetchPlaybackResource: suspend (SongItem, Boolean) -> PlaybackResource?,
     private val isCasting: () -> Boolean,
     private val onSave: () -> Unit,
+    private val onQueueCleared: () -> Unit,
     private val onDiscordUpdate: () -> Unit,
 ) {
     var playbackReleased = false
@@ -53,10 +69,18 @@ internal class AndroidDeviceConnectPlayback(
     }
 
     private var controllerPlayback: DcLocalPlaybackState? = null
+    private var provisionalControllerClearPending = false
     private var appliedSyncSessionId: String? = null
     private var appliedSyncTrackRevision: Long? = null
     val port: DeviceConnectPlaybackPort =
         object : DeviceConnectPlaybackPort {
+            @Volatile private var pendingExplicitRadioRequest = false
+            private var explicitRadioBootstrapPending = false
+
+            override fun onExplicitRadioRequest() {
+                pendingExplicitRadioRequest = true
+            }
+
             override val canStartDefaultPlayback: Boolean get() = !isCasting()
 
             override suspend fun snapshot(): DcLocalPlaybackState =
@@ -80,6 +104,7 @@ internal class AndroidDeviceConnectPlayback(
                                     .getOrNull(player.currentMediaItemIndex.value)
                                     ?.id,
                         finite = queue.isFiniteQueue,
+                        explicitRadioQueue = queue.explicitRadioQueue,
                         scrobbleSession = scrobbleManager.session(),
                     )
                 }
@@ -114,11 +139,18 @@ internal class AndroidDeviceConnectPlayback(
                 }
                 transitions.cancelNextTrackPreload()
                 val seedId = desiredQueue.originalItems.firstOrNull()?.id
+                val startsExplicitRadio =
+                    desired.explicitRadioQueue && desiredQueue.displayedItems.size == 1 &&
+                        (pendingExplicitRadioRequest || !queue.explicitRadioQueue || appliedSyncSessionId != snapshot.sessionId)
+                pendingExplicitRadioRequest = false
                 if (AndroidDeviceConnect.manager.remote.isFollowing || desired.finite != queue.isFiniteQueue ||
-                    seedId != queue.recommendationSeedSongId
+                    seedId != queue.recommendationSeedSongId || desired.explicitRadioQueue != queue.explicitRadioQueue ||
+                    startsExplicitRadio
                 ) {
                     queue.resetQueueSession(seedId, desired.title, desired.finite)
+                    explicitRadioBootstrapPending = startsExplicitRadio
                 }
+                queue.setExplicitRadioQueue(desired.explicitRadioQueue)
                 queue.setTitle(desired.title)
                 repeatMode.value = desired.repeatMode.toPlayerRepeatMode()
                 if (trackChanged || previousQueue != desiredQueue) player.restoreQueue(desiredQueue, currentTrackChanged = trackChanged)
@@ -183,10 +215,18 @@ internal class AndroidDeviceConnectPlayback(
                     player.isPlaying.value,
                     desired.scrobbleSession,
                 )
-                if (!queue.isFiniteQueue && queue.recommendationBootstrapJob == null && song != null) {
-                    queue.bootstrapRecommendations(queue.recommendationSeedSongId ?: song.id)
+                if (!queue.isFiniteQueue && queue.recommendationBootstrapJob == null && song != null &&
+                    (!desired.explicitRadioQueue || explicitRadioBootstrapPending)
+                ) {
+                    queue.bootstrapRecommendations(
+                        queue.recommendationSeedSongId ?: song.id,
+                        allowRepeatMode = desired.explicitRadioQueue,
+                    )
+                    explicitRadioBootstrapPending = queue.recommendationBootstrapJob == null
                 }
                 onSave()
+                // A committed empty snapshot is an explicit clear even if the local queue was already empty.
+                if (shouldClearPersistedPlaybackForAppliedQueue(desiredQueue)) onQueueCleared()
             }
 
             override suspend fun acknowledge(snapshot: DcPlaybackSnapshot) =
@@ -208,33 +248,49 @@ internal class AndroidDeviceConnectPlayback(
                     if (!playbackReleased && shouldCommit()) snapshot() else null
                 }
 
-            override suspend fun setControllerPlayback(playback: DcLocalPlaybackState?) =
-                withContext(Dispatchers.Main.immediate) {
-                    if (playbackReleased) return@withContext
-                    if (playback != null && controllerPlayback?.queue != playback.queue) {
-                        transitions.cancelNextTrackPreload()
-                        video.clearVideoMode()
-                        queue.resetQueueSession(
-                            playback.queue.originalItems
-                                .firstOrNull()
-                                ?.id,
-                            playback.title,
-                            playback.finite,
-                        )
-                        queue.setTitle(playback.title)
-                        repeatMode.value = playback.repeatMode.toPlayerRepeatMode()
-                        if (player.queueSnapshots.value != playback.queue) player.restoreQueue(playback.queue)
-                        shuffleModeEnabled.value = playback.queue.isShuffled
-                        syncTargetLoaded = false
-                    }
-                    controllerPlayback = playback
-                    player.setControllerPlayback(playback)
-                    if (playback !=
-                        null
-                    ) {
-                        scrobbleManager.setReportingEnabled(false, player.currentSong.value, playback.playing, playback.scrobbleSession)
-                    }
+            override suspend fun setControllerPlayback(
+                playback: DcLocalPlaybackState?,
+                provisional: Boolean,
+            ) = withContext(Dispatchers.Main.immediate) {
+                if (playbackReleased) return@withContext
+                val clearsQueue =
+                    shouldClearPersistedPlaybackForControllerState(
+                        previous = controllerPlayback,
+                        next = playback,
+                        provisional = provisional,
+                        provisionalClearPending = provisionalControllerClearPending,
+                    )
+                // A provisional empty state is meaningful even when the local queue is already empty:
+                // persisted playback can still hold a queue from an earlier session.
+                provisionalControllerClearPending =
+                    provisional && playback?.queue?.displayedItems?.isEmpty() == true
+                if (playback != null && controllerPlayback?.queue != playback.queue) {
+                    transitions.cancelNextTrackPreload()
+                    video.clearVideoMode()
+                    queue.resetQueueSession(
+                        playback.queue.originalItems
+                            .firstOrNull()
+                            ?.id,
+                        playback.title,
+                        playback.finite,
+                    )
+                    queue.setExplicitRadioQueue(playback.explicitRadioQueue)
+                    queue.setTitle(playback.title)
+                    repeatMode.value = playback.repeatMode.toPlayerRepeatMode()
+                    if (player.queueSnapshots.value != playback.queue) player.restoreQueue(playback.queue)
+                    shuffleModeEnabled.value = playback.queue.isShuffled
+                    syncTargetLoaded = false
                 }
+                if (playback != null) queue.setExplicitRadioQueue(playback.explicitRadioQueue)
+                controllerPlayback = playback
+                player.setControllerPlayback(playback)
+                if (clearsQueue) onQueueCleared()
+                if (playback !=
+                    null
+                ) {
+                    scrobbleManager.setReportingEnabled(false, player.currentSong.value, playback.playing, playback.scrobbleSession)
+                }
+            }
 
             override suspend fun setPlaying(playing: Boolean) =
                 withContext(Dispatchers.Main.immediate) {

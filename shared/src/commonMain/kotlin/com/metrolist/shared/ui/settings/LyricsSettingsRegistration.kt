@@ -19,16 +19,21 @@ import androidx.compose.material3.ExperimentalMaterial3ExpressiveApi
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import com.metrolist.shared.api.lyrics.AiProviderPresets
 import com.metrolist.shared.generated.resources.*
+import com.metrolist.shared.repository.LyricsRepository
 import com.metrolist.shared.settings.LyricsTextSizeRange
 import com.metrolist.shared.settings.PlayerBackgroundStyle
 import com.metrolist.shared.settings.Settings
 import com.metrolist.shared.ui.components.lyrics.LyricsOffsetEditor
 import com.metrolist.shared.ui.icons.MetrolistIcons
+import kotlinx.coroutines.launch
 import org.jetbrains.compose.resources.stringResource
+import org.koin.mp.KoinPlatform
 import kotlin.math.roundToInt
 
 private fun isDirectLyricsTranslationProvider(provider: String): Boolean = provider == "DeepL (keyless)" || provider == "Google Translate"
@@ -253,6 +258,16 @@ internal fun SettingsUiRegistryBuilder.registerLyricsSettings(host: SharedSettin
                     LyricsProviderOrderSetting()
                 }
             }
+            val scope = rememberCoroutineScope()
+            val lyricsRepository = remember { KoinPlatform.getKoin().get<LyricsRepository>() }
+            group("fetchedLyrics", stringResource(Res.string.fetched_lyrics)) {
+                action(
+                    id = "clearFetchedLyrics",
+                    title = stringResource(Res.string.clear_fetched_lyrics),
+                    description = stringResource(Res.string.clear_fetched_lyrics_description),
+                    confirmationMessage = stringResource(Res.string.clear_fetched_lyrics_confirm),
+                ) { scope.launch { lyricsRepository.clearFetchedLyrics() } }
+            }
         }
     }
 
@@ -373,13 +388,23 @@ internal fun SettingsUiRegistryBuilder.registerLyricsSettings(host: SharedSettin
                             if (oauthConnected) {
                                 stringResource(Res.string.ai_openrouter_oauth_active)
                             } else {
-                                stringResource(if (apiKey.isBlank()) Res.string.required else Res.string.configured)
+                                stringResource(
+                                    when {
+                                        apiKey.isNotBlank() -> Res.string.configured
+                                        preset.keyless -> Res.string.ai_api_key_optional
+                                        else -> Res.string.required
+                                    },
+                                )
                             },
                         value = apiKey,
                         enabled = !oauthConnected,
                         secret = true,
                     ) {
-                        if (provider == "DeepL") settings.lyricsDeepLApiKey = it else settings.setLyricsAiApiKey(provider, it)
+                        if (provider == "DeepL") {
+                            settings.lyricsDeepLApiKey = it
+                        } else {
+                            settings.setLyricsAiApiKey(provider, it)
+                        }
                     }
                     if (preset.editableEndpoint) {
                         text(
@@ -404,8 +429,9 @@ internal fun SettingsUiRegistryBuilder.registerLyricsSettings(host: SharedSettin
             }
             if (preset.isAi && !directProvider) {
                 val apiKey = settings.lyricsAiApiKeyFor(provider)
-                val modelsReady = oauthConnected || apiKey.isNotBlank() || preset.publicModelList
+                val modelsReady = oauthConnected || apiKey.isNotBlank() || preset.publicModelList || preset.keyless
                 val (modelKey, modelUrl) = settings.lyricsAiCredentials(provider)
+                val freeOnly = preset.keyless && modelKey.isBlank()
                 group("models", stringResource(Res.string.ai_models)) {
                     custom(
                         id = "translationModel",
@@ -421,6 +447,7 @@ internal fun SettingsUiRegistryBuilder.registerLyricsSettings(host: SharedSettin
                             apiKey = modelKey,
                             baseUrl = modelUrl,
                             allowBlank = false,
+                            freeOnly = freeOnly,
                             enabled = modelsReady,
                         ) { settings.lyricsAiModel = it }
                     }
@@ -441,7 +468,12 @@ internal fun SettingsUiRegistryBuilder.registerLyricsSettings(host: SharedSettin
                     value = settings.lyricsAiSystemPrompt,
                     enabled =
                         preset.isAi && !directProvider &&
-                            (oauthConnected || settings.lyricsAiApiKeyFor(provider).isNotBlank() || preset.publicModelList),
+                            (
+                                oauthConnected ||
+                                    settings.lyricsAiApiKeyFor(provider).isNotBlank() ||
+                                    preset.publicModelList ||
+                                    preset.keyless
+                            ),
                     multiline = true,
                 ) { settings.lyricsAiSystemPrompt = it }
             }

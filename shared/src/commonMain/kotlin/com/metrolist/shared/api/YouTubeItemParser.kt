@@ -40,13 +40,19 @@ internal object YouTubeItemParser {
             "(?i)^(?:today|yesterday|just now|\\d+\\s*(?:minutes?|hours?|days?|weeks?|months?|years?|mo|[smhdwy])\\s+ago|(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)\\.?\\s+\\d{1,2}(?:,\\s*\\d{4})?|\\d{1,2}[/-]\\d{1,2}[/-]\\d{2,4})$",
         )
 
-    private val textDurationRegex = Regex("(?i)^(?:(\\d+)\\s*(?:hr|hrs|h|hours?))?\\s*(?:(\\d+)\\s*(?:min|mins|m|minutes?))?$")
+    private val textDurationRegex =
+        Regex(
+            """^(?:(\d+)\s*(?:hr|hrs|h|hours?))?\s*(?:(\d+)\s*(?:min|mins|m|minutes?))?\s*(?:(\d+)\s*(?:s|secs?|seconds?))?$""",
+            RegexOption.IGNORE_CASE,
+        )
 
     private fun parseTextDuration(text: String): Long? {
         val match = textDurationRegex.matchEntire(text.trim()) ?: return null
         val hours = match.groupValues[1].toLongOrNull()
         val minutes = match.groupValues[2].toLongOrNull()
-        return if (hours == null && minutes == null) null else (hours ?: 0) * 3600 + (minutes ?: 0) * 60
+        val seconds = match.groupValues[3].toLongOrNull()
+        if (hours == null && minutes == null && seconds == null) return null
+        return (hours ?: 0L) * 3600L + (minutes ?: 0L) * 60L + (seconds ?: 0L)
     }
 
     /** Episode rows list "views • date" in `subtitle` and the duration in `playbackProgress`; classify each piece by shape. */
@@ -415,8 +421,7 @@ internal object YouTubeItemParser {
             musicVideoType = renderer.musicVideoType() ?: title.inferredMusicVideoType(renderer.hasVideoThumbnail()),
             playCountText = playCountText,
             isNew = flags.newRelease,
-            // Greyed album tracks keep their duration but drop every watch endpoint; only episodes may play without one.
-            isUnavailable = isUnavailable(renderer, title, duration = null),
+            isUnavailable = isUnavailable(renderer, title, duration),
         )
     }
 
@@ -427,21 +432,23 @@ internal object YouTubeItemParser {
     ): Boolean {
         if (renderer.string("musicItemRendererDisplayPolicy") != "MUSIC_ITEM_RENDERER_DISPLAY_POLICY_GREY_OUT") return false
         if (title.isBlank()) return true
-        // YouTube Music's display policy can hide playable videos, even omitting their play controls.
+        // Browse restrictions belong to that client; playback may succeed with another one.
         if ((duration ?: 0L) > 0L) return false
+        val titleEndpoint =
+            renderer["flexColumns"]
+                .asArray()
+                ?.getOrNull(0)
+                .flexColumnRuns()
+                ?.firstOrNull()
+                .asObject()
+                ?.get("navigationEndpoint")
         val endpoints =
             listOf(
                 renderer["onTap"],
                 renderer["navigationEndpoint"],
                 renderer["playNavigationEndpoint"],
                 renderer["overlay"].asObject()?.findFirstObject("musicPlayButtonRenderer"),
-                renderer["flexColumns"]
-                    .asArray()
-                    ?.getOrNull(0)
-                    .flexColumnRuns()
-                    ?.firstOrNull()
-                    .asObject()
-                    ?.get("navigationEndpoint"),
+                titleEndpoint,
             )
         return endpoints.none {
             !it

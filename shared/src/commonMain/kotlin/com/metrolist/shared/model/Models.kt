@@ -46,10 +46,12 @@ data class SongItem(
     val customArtist: String? = null,
     val canonicalTitle: String? = null,
     val canonicalArtists: List<ArtistTiny>? = null,
+    val originalQueueItemId: String? = null,
     val explicitness: Boolean? = null,
     override val libraryAddedAt: Long? = null,
     override val libraryUpdatedAt: Long? = null,
     val playlistLocalMappingId: Int? = null,
+    val playlistOccurrenceId: String? = null,
     val playbackPositionMs: Long? = null,
     val playbackProgressPercent: Int? = null,
     override val isUnavailable: Boolean = false,
@@ -263,6 +265,7 @@ data class HomeSection(
     val headerBrowseId: String? = null,
     val numItemsPerColumn: Int? = null,
     val isResponsiveList: Boolean = false,
+    val excludedItemIds: Set<String> = emptySet(),
 )
 
 @Serializable

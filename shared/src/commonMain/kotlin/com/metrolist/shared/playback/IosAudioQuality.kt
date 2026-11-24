@@ -15,18 +15,22 @@ internal fun PlaybackResource.isWebmOpus(): Boolean =
 internal fun iosPlaybackAudioQuality(setting: String): AudioQuality =
     runCatching { AudioQuality.valueOf(setting) }.getOrDefault(AudioQuality.AUTO)
 
-internal fun ContentHints.withIosAudioCapabilities(allowHls: Boolean = false) =
-    copy(sabrFirst = false).withStreamCapabilities(
-        allowHls = allowHls,
-        allowSabr = true,
-        allowBoundedRange = true,
-    )
+internal fun ContentHints.withIosAudioCapabilities(
+    allowHls: Boolean = false,
+    allowSabr: Boolean = true,
+    allowBoundedRange: Boolean = true,
+) = copy(sabrFirst = false).withStreamCapabilities(
+    allowHls = allowHls,
+    allowSabr = allowSabr,
+    allowBoundedRange = allowBoundedRange,
+)
 
 internal suspend fun resolveIosAudioResource(
     quality: AudioQuality,
     refresh: Boolean = false,
     forDownload: Boolean = false,
     forceAac: Boolean = false,
+    allowOpusRemux: Boolean = true,
     resolve: suspend (AudioQuality, Boolean, Boolean) -> PlaybackResource,
 ): PlaybackResource {
     val requestedQuality = if (forceAac || (forDownload && quality != AudioQuality.LOW)) AudioQuality.MP4 else quality
@@ -44,7 +48,10 @@ internal suspend fun resolveIosAudioResource(
                     (
                         !forDownload && (
                             (!resource.isDirectFile && !resource.isSabr) ||
-                                (!forceAac && resource.isWebmOpus() && (resource.contentLengthBytes ?: 0L) <= IOS_OPUS_MAX_INPUT_BYTES)
+                                (
+                                    !forceAac && allowOpusRemux && resource.isWebmOpus() &&
+                                        (resource.contentLengthBytes ?: 0L) <= IOS_OPUS_MAX_INPUT_BYTES
+                                )
                         )
                     )
             )

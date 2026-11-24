@@ -222,6 +222,8 @@ class ListenTogetherManager(
     val isInRoom: StateFlow<Boolean> = _isInRoom.asStateFlow()
     private val _roomRequestPending = MutableStateFlow(false)
     val roomRequestPending: StateFlow<Boolean> = _roomRequestPending.asStateFlow()
+    private val _persistedRoomSession = MutableStateFlow(false)
+    val persistedRoomSession: StateFlow<Boolean> = _persistedRoomSession.asStateFlow()
     private val _joinRequestPending = MutableStateFlow(false)
     val joinRequestPending: StateFlow<Boolean> = _joinRequestPending.asStateFlow()
     private val _joinRequestSubmitted = MutableStateFlow(false)
@@ -871,7 +873,10 @@ class ListenTogetherManager(
     }
 
     val hasActiveOrPendingRoom: Boolean
-        get() = _isInRoom.value || hasPendingRoomRequest || hasPersistedSession || reconnectJob?.isActive == true
+        get() =
+            _isInRoom.value || hasPendingRoomRequest ||
+                (hasPersistedSession && _connectionState.value != ListenTogetherConnectionState.ERROR) ||
+                reconnectJob?.isActive == true
 
     val hasPendingRoomRequest: Boolean
         get() = pendingAction != null || awaitingRoomResponse
@@ -1467,6 +1472,7 @@ class ListenTogetherManager(
     private fun handleRoomCreated(payload: RoomCreatedPayload) {
         if (!claimRoomRequest()) return
         sessionToken = payload.sessionToken
+        _persistedRoomSession.value = !sessionToken.isNullOrBlank()
         restoredRoomCode = payload.roomCode
         sessionStartedAt = wallClockMs()
         _userId.value = payload.userId
@@ -1509,6 +1515,7 @@ class ListenTogetherManager(
         if (!claimRoomRequest()) return
         cancelRemotePlayback()
         sessionToken = payload.sessionToken
+        _persistedRoomSession.value = !sessionToken.isNullOrBlank()
         restoredRoomCode = payload.roomCode
         sessionStartedAt = wallClockMs()
         _userId.value = payload.userId
@@ -1860,6 +1867,7 @@ class ListenTogetherManager(
         } else if (track != null) {
             startRemotePlayback(track, state.queue, state.position, state.isPlaying, state.lastUpdate, barrier)
         } else {
+            if (_role.value == ListenTogetherRoomRole.GUEST) applyCanonicalQueue(state.queue)
             playback.setPlayingFromRemote(false)
         }
         applyHostVolume(state.volume)
@@ -2071,6 +2079,9 @@ class ListenTogetherManager(
 
     private suspend fun applyCanonicalQueue(queue: List<TrackInfo>) {
         val canonical = canonicalUpcomingQueue(queue)
+        // An idle room has no loaded track, so the guest loading guard would defer the clear forever
+        // and leave a queue from an earlier session saved on disk. Handle that confirmed clear first.
+        if (clearIdleGuestQueue(canonical)) return
         if (loadingTrackId != null || (_role.value == ListenTogetherRoomRole.GUEST && !hasLoadedRoomTrack)) {
             pendingCanonicalQueue = canonical.takeIf { it != loadingQueue }
             return
@@ -2091,11 +2102,25 @@ class ListenTogetherManager(
             }
         val localById = localUpcoming.groupBy { it.id }.mapValues { (_, songs) -> ArrayDeque(songs) }
         val merged = target.map { track -> track.mergeInto(localById[track.id]?.removeFirstOrNull()) }
-        if (merged != localUpcoming) playback.replaceUpcomingQueueFromRemote(merged)
+        // An idle room with no playable tracks is an explicit clear even when the live queue is already empty;
+        // a queue saved from an earlier session must not survive it.
+        if (merged != localUpcoming || (merged.isEmpty() && currentId == null)) {
+            playback.replaceUpcomingQueueFromRemote(merged)
+        }
         if (_role.value == ListenTogetherRoomRole.GUEST) playback.setQueueTitleFromRemote(_roomState.value?.queueTitle)
         if (_role.value == ListenTogetherRoomRole.HOST) {
             lastQueueSnapshot = canonical
         }
+    }
+
+    private suspend fun clearIdleGuestQueue(queue: List<TrackInfo>): Boolean {
+        if (_role.value != ListenTogetherRoomRole.GUEST || queue.isNotEmpty()) return false
+        if (loadingTrackId != null || _roomState.value?.currentTrack != null) return false
+        // Always issue the clear: the platform call also removes persisted state when nothing is loaded,
+        // so a queue saved by an earlier session cannot come back after a restart.
+        playback.replaceUpcomingQueueFromRemote(emptyList())
+        playback.setQueueTitleFromRemote(_roomState.value?.queueTitle)
+        return true
     }
 
     private suspend fun applyPendingCanonicalQueue() {
@@ -2252,6 +2277,12 @@ class ListenTogetherManager(
     }
 
     private fun cleanupRoom(clearSession: Boolean) {
+        if (clearSession) {
+            sessionToken = null
+            restoredRoomCode = null
+            sessionStartedAt = 0L
+            _persistedRoomSession.value = false
+        }
         val wasInRoom = _isInRoom.value
         clearRoomRequest()
         reconnectJob?.cancel()
@@ -2284,17 +2315,12 @@ class ListenTogetherManager(
         resetHostObservation()
         revisionFilter.reset()
         serverClock.reset()
-        if (clearSession) {
-            sessionToken = null
-            restoredRoomCode = null
-            sessionStartedAt = 0L
-            if (sessionPersistenceEnabled) Settings.shared.listenTogetherDesktopSession = ""
-        }
         if (wasInRoom) {
             scope.launch {
                 playback.setPlaybackSpeedFromRemote(Settings.shared.playbackSpeed.coerceIn(0.5f, 2f))
             }
         }
+        if (clearSession && sessionPersistenceEnabled) Settings.shared.listenTogetherDesktopSession = ""
     }
 
     private fun clearRoomRequest() {
@@ -2491,9 +2517,11 @@ class ListenTogetherManager(
         val restoredUrl = fields[5].takeIf(::isAllowedListenTogetherServerUrl) ?: return
         sessionToken = fields[0].takeIf { it.isNotBlank() }
         restoredRoomCode = fields[1].takeIf { it.isNotBlank() }
+        _persistedRoomSession.value = !sessionToken.isNullOrBlank() && !restoredRoomCode.isNullOrBlank()
         if (sessionToken == null || restoredRoomCode == null) {
             sessionToken = null
             restoredRoomCode = null
+            _persistedRoomSession.value = false
             return
         }
         if (_username.value.isBlank()) _username.value = fields[2]

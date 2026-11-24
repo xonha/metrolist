@@ -1,7 +1,10 @@
 package com.metrolist.android.playback
 
+import com.metrolist.android.deviceconnect.AndroidDeviceConnect
+import com.metrolist.android.listentogether.AndroidListenTogetherManager
 import com.metrolist.shared.cast.CastDevice
 import com.metrolist.shared.model.SongItem
+import com.metrolist.shared.model.indexOfPlaylistOccurrence
 import com.metrolist.shared.playback.PlaybackSeekSource
 import com.metrolist.shared.ui.playback.PlaybackController
 import com.metrolist.shared.ui.playback.PlaybackUiState
@@ -17,6 +20,16 @@ class AndroidPlaybackController(
     private val connection: PlayerConnection,
     scope: CoroutineScope,
 ) : PlaybackController {
+    override val playbackVolume = connection.volume
+    override val playbackCommandGeneration: Long get() = connection.playbackCommandGeneration
+    override val playbackCommands = connection.playbackCommands
+    override val wrappedSoundtrackAllowed =
+        combine(
+            connection.castState,
+            AndroidListenTogetherManager.playbackRequired,
+            AndroidDeviceConnect.manager.remote.state,
+        ) { cast, inRoom, remote -> !cast.isConnected && !inRoom && remote.sessionId == null }
+
     private val baseState =
         combine(
             connection.currentSong,
@@ -63,7 +76,8 @@ class AndroidPlaybackController(
         songsOnly: Boolean,
     ) {
         val songs = queue.ifEmpty { listOf(song) }
-        connection.playQueue(songs, songs.indexOfFirst { it.id == song.id }.coerceAtLeast(0), songsOnly = songsOnly)
+        val index = songs.indexOfPlaylistOccurrence(song)
+        connection.playQueue(songs, index.coerceAtLeast(0), songsOnly = songsOnly)
     }
 
     override fun shuffleQueue(

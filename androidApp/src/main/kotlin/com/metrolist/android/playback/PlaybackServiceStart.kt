@@ -1,5 +1,6 @@
 package com.metrolist.android.playback
 
+import android.app.ForegroundServiceStartNotAllowedException
 import android.app.PendingIntent
 import android.app.Service
 import android.content.Intent
@@ -15,8 +16,11 @@ import com.metrolist.android.R
 
 internal const val PLAYBACK_NOTIFICATION_CHANNEL_ID = "playback"
 
+// Dismissing the paused notification sends a background stop; promoting it would post the notification again.
 internal fun requiresPlaybackForegroundStart(intent: Intent?): Boolean =
-    intent != null && (intent.action == Intent.ACTION_MEDIA_BUTTON || intent.action == null)
+    intent != null &&
+        (intent.action == Intent.ACTION_MEDIA_BUTTON || intent.action == null) &&
+        !intent.getBooleanExtra(MediaNotification.NOTIFICATION_DISMISSED_EVENT_KEY, false)
 
 internal fun shouldReconcilePlaybackServiceStart(
     intent: Intent?,
@@ -24,6 +28,10 @@ internal fun shouldReconcilePlaybackServiceStart(
 ): Boolean =
     player?.currentMediaItem == null || player.playbackState == Player.STATE_IDLE ||
         (intent?.action == Intent.ACTION_MEDIA_BUTTON && !player.playWhenReady)
+
+internal fun isForegroundStartDenied(error: RuntimeException): Boolean =
+    error is SecurityException ||
+        (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S && error is ForegroundServiceStartNotAllowedException)
 
 internal fun Service.promotePlaybackServiceStart(notification: MediaNotification?) {
     val startupNotification =

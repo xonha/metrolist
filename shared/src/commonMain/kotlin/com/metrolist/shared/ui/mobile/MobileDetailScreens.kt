@@ -47,6 +47,7 @@ import com.metrolist.shared.generated.resources.more_options
 import com.metrolist.shared.generated.resources.playlist_removed_from_youtube
 import com.metrolist.shared.generated.resources.retry
 import com.metrolist.shared.generated.resources.unable_to_load_podcast
+import com.metrolist.shared.generated.resources.unable_to_update_podcast
 import com.metrolist.shared.model.AlbumItem
 import com.metrolist.shared.model.AlbumPage
 import com.metrolist.shared.model.ArtistItem
@@ -75,6 +76,7 @@ import com.metrolist.shared.settings.BlockedContent
 import com.metrolist.shared.settings.SavedPlaylistSongSorting
 import com.metrolist.shared.settings.Settings
 import com.metrolist.shared.state.AlbumLikeState
+import com.metrolist.shared.state.AlbumLikeToggleAlreadyInProgressException
 import com.metrolist.shared.state.GlobalYouTubeRepository
 import com.metrolist.shared.state.PodcastLibrary
 import com.metrolist.shared.state.SongLikeState
@@ -191,7 +193,9 @@ internal fun MobileAlbumScreen(
                 isFavorite = isFavorite,
                 onFavorite = {
                     AlbumLikeState.toggleAlbumLike(page.album, page.songs) { result ->
-                        if (result.isFailure) onSwipeFeedback(favoriteErrorText)
+                        if (result.exceptionOrNull() !is AlbumLikeToggleAlreadyInProgressException && result.isFailure) {
+                            onSwipeFeedback(favoriteErrorText)
+                        }
                     }
                 },
                 onArtistClick = onArtistClick,
@@ -344,10 +348,10 @@ internal fun MobileArtistScreen(
             operationError = null
             loader.load()
         },
-        onItemClick = { item ->
+        onItemClick = { sectionTitle, item ->
             if (item is SongItem) {
                 scope.launch {
-                    val songs = fullArtistShelfQueue(item, sections, page?.sectionBrowseIds.orEmpty())
+                    val songs = fullArtistShelfQueue(item, sectionTitle, sections, page?.sectionBrowseIds.orEmpty())
                     playbackController.play(songs.first { it.id == item.id }, songs)
                 }
             } else {
@@ -652,6 +656,8 @@ internal fun MobilePlaylistScreen(
             PopupVisibility(visible = showAddSong) {
                 ModalBottomSheet(onDismissRequest = { showAddSong = false }) {
                     AddSongSheetContent(
+                        database = database,
+                        isLocalPlaylist = playlist.isLocal,
                         existingSongIds = loadedSongs.mapTo(mutableSetOf()) { it.id },
                         onDismiss = { showAddSong = false },
                         onAddSong = { song, allowDuplicate ->
@@ -739,6 +745,8 @@ internal fun MobilePlaylistScreen(
                 durationSongs = page?.takeUnless { it.isOffline }?.songs ?: cachedSections?.playlistSongs().orEmpty(),
                 hasMoreSongs = page?.hasMore == true,
                 hiddenSongCount = loadedSongs.size - songs.size,
+                // Unlike the visible rows, the artwork list already includes hidden tracks.
+                loadedSongCount = loadedSongs.size,
                 paginationContent = {
                     if (page?.hasMore == true) {
                         if (pageFailed) {
@@ -898,6 +906,8 @@ internal fun MobilePlaylistScreen(
                 onBackClick = onBack,
                 onArtistClick = onArtistClick,
                 currentSongId = playbackState.currentSongId,
+                currentQueueItemId = playbackState.originalQueueItemId,
+                currentSongOccurrenceKey = playbackState.currentSongOccurrenceKey,
                 isPlaying = playbackState.isPlaying,
                 contentPadding = PaddingValues(bottom = 88.dp + bottomContentPadding),
                 modifier = modifier.fillMaxSize(),
@@ -915,12 +925,15 @@ internal fun MobilePodcastScreen(
     onBack: () -> Unit,
     onShare: (String) -> Unit = {},
     onSongMenu: (YTItem) -> Unit,
+    onSaveError: (String) -> Unit,
     modifier: Modifier = Modifier,
     onChannelClick: (String) -> Unit = {},
     bottomContentPadding: Dp = 0.dp,
 ) {
     val scope = rememberCoroutineScope()
     val errorText = stringResource(Res.string.unable_to_load_podcast)
+    val podcastSaveError = stringResource(Res.string.unable_to_update_podcast)
+    val episodeSaveError = stringResource(Res.string.error_occurred)
     val playbackState by remember(playbackController) {
         playbackController.listState
     }.collectAsState(playbackController.state.value.listState())
@@ -977,12 +990,16 @@ internal fun MobilePodcastScreen(
                 scope.launch {
                     val saved = !loaded.saved
                     isSaving = true
-                    PodcastLibrary
-                        .setPodcastSaved(database, loaded.podcast, saved)
-                        .onSuccess {
-                            page = page?.copy(saved = saved)
-                        }
-                    isSaving = false
+                    try {
+                        PodcastLibrary.setPodcastSaved(database, loaded.podcast, saved).getOrThrow()
+                        page = page?.copy(saved = saved)
+                    } catch (error: CancellationException) {
+                        throw error
+                    } catch (_: Exception) {
+                        onSaveError(podcastSaveError)
+                    } finally {
+                        isSaving = false
+                    }
                 }
             }
         },
@@ -998,11 +1015,16 @@ internal fun MobilePodcastScreen(
         },
         onToggleEpisodeSaved = { episode ->
             scope.launch {
-                PodcastLibrary.setEpisodeSaved(database, episode, !episode.saved).onSuccess { updated ->
+                try {
+                    val updated = PodcastLibrary.setEpisodeSaved(database, episode, !episode.saved).getOrThrow()
                     page =
                         page?.let { latest ->
                             latest.copy(episodes = latest.episodes.map { if (it.id == updated.id) updated else it })
                         }
+                } catch (error: CancellationException) {
+                    throw error
+                } catch (_: Exception) {
+                    onSaveError(episodeSaveError)
                 }
             }
         },
@@ -1014,7 +1036,7 @@ internal fun MobilePodcastScreen(
         },
         onDownload = null,
         onShare = { episode ->
-            onShare(ShareUrls.song(episode.id))
+            onShare(ShareUrls.youtubeMusicSong(episode.id))
         },
         contentPadding = PaddingValues(bottom = 88.dp + bottomContentPadding),
         modifier = modifier.fillMaxSize(),

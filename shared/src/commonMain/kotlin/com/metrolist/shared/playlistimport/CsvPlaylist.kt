@@ -42,6 +42,7 @@ class CsvPlaylist(
         resolveLocalReference: (String) -> String? = { null },
     ): List<PlaylistImportManager.CsvTrack> {
         if (!mapping.isValid(columnCount)) throw ImportException(ImportErrorKey.NoTracksRecognized)
+        val trackLimit = PlaylistImportManager.MAX_PLAYLIST_TRACKS
         return rows
             .asSequence()
             .drop(if (mapping.hasHeader) 1 else 0)
@@ -62,27 +63,44 @@ class CsvPlaylist(
                     album = cell(mapping.album),
                     customTitle = title.takeIf(String::isNotBlank),
                 )
-            }.take(PlaylistImportManager.MAX_PLAYLIST_TRACKS)
+            }.take(trackLimit + 1)
             .toList()
+            .also { if (it.size > trackLimit) throw ImportException(ImportErrorKey.TooManyTracks) }
     }
 
     companion object {
-        fun parse(text: String): CsvPlaylist {
+        private val separatorDirective = Regex("""^sep=([,;\t])(?:\r\n|\r|\n)""", RegexOption.IGNORE_CASE)
+
+        fun parse(text: String): CsvPlaylist = parse(text, preferTabs = false)
+
+        internal fun parse(
+            text: String,
+            preferTabs: Boolean,
+        ): CsvPlaylist {
             if (text.length > PlaylistImportManager.MAX_CSV_CHARACTERS) throw ImportException(ImportErrorKey.FileReadFailed)
             val input = text.removePrefix("\uFEFF")
-            val delimiter = detectDelimiter(input)
+            val directive = separatorDirective.find(input)
+            val delimiter = directive?.groupValues?.get(1)?.single() ?: detectDelimiter(input, preferTabs)
             val rows = mutableListOf<List<String>>()
             var row = mutableListOf<String>()
             val cell = StringBuilder()
             var quoted = false
             var closedQuote = false
-            var index = 0
+            var index = directive?.range?.last?.plus(1) ?: 0
 
             fun endCell() {
                 row += cell.toString()
                 cell.clear()
                 closedQuote = false
             }
+
+            fun endRow() {
+                endCell()
+                // Expose the same first nonblank row to header detection, preview and track mapping.
+                if (rows.isNotEmpty() || row.any(String::isNotBlank)) rows += row
+                row = mutableListOf()
+            }
+
             while (index < input.length) {
                 val char = input[index]
                 when {
@@ -103,9 +121,7 @@ class CsvPlaylist(
                     }
 
                     char == '\r' || char == '\n' -> {
-                        endCell()
-                        rows += row
-                        row = mutableListOf()
+                        endRow()
                         if (char == '\r' && input.getOrNull(index + 1) == '\n') index++
                     }
 
@@ -125,13 +141,15 @@ class CsvPlaylist(
             }
             if (quoted) throw ImportException(ImportErrorKey.FileReadFailed)
             if (cell.isNotEmpty() || row.isNotEmpty() || closedQuote) {
-                endCell()
-                rows += row
+                endRow()
             }
             return CsvPlaylist(rows)
         }
 
-        private fun detectDelimiter(text: String): Char {
+        private fun detectDelimiter(
+            text: String,
+            preferTabs: Boolean,
+        ): Char {
             val delimiters = listOf(',', ';', '\t')
             val counts = mutableListOf<IntArray>()
             var row = IntArray(delimiters.size)
@@ -154,6 +172,7 @@ class CsvPlaylist(
                 index++
             }
             if (row.any { it > 0 }) counts += row
+            val tabIndex = delimiters.indexOf('\t')
             val best =
                 delimiters.indices.maxWithOrNull(
                     compareBy<Int> { candidate ->
@@ -164,6 +183,9 @@ class CsvPlaylist(
                             .eachCount()
                             .values
                             .maxOrNull() ?: 0
+                    }.thenBy { candidate ->
+                        // When both delimiters look equally consistent, prefer the declared TSV format.
+                        preferTabs && candidate == tabIndex && counts.any { it[tabIndex] > 0 }
                     }.thenBy { candidate -> counts.firstOrNull()?.get(candidate) ?: 0 },
                 ) ?: 0
             return delimiters[best]

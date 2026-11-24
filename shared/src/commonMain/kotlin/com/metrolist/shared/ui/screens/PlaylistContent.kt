@@ -27,6 +27,9 @@ import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.material3.ExperimentalMaterial3ExpressiveApi
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
+import androidx.compose.material3.IconButtonDefaults
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -50,6 +53,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.metrolist.shared.generated.resources.Res
 import com.metrolist.shared.generated.resources.add_a_song
+import com.metrolist.shared.generated.resources.add_to_playlist
 import com.metrolist.shared.generated.resources.n_hidden_song
 import com.metrolist.shared.generated.resources.partial_song_count
 import com.metrolist.shared.generated.resources.search_no_results
@@ -58,6 +62,7 @@ import com.metrolist.shared.model.PlaylistItem
 import com.metrolist.shared.model.SongItem
 import com.metrolist.shared.model.canEdit
 import com.metrolist.shared.model.playlistLazyItemKeys
+import com.metrolist.shared.model.playlistOccurrenceIdentity
 import com.metrolist.shared.model.playlistSearchIndices
 import com.metrolist.shared.model.playlistTotalDuration
 import com.metrolist.shared.model.withLocalArtwork
@@ -79,6 +84,7 @@ import com.metrolist.shared.ui.components.rememberScrollingFabState
 import com.metrolist.shared.ui.components.totalDurationText
 import com.metrolist.shared.ui.haptics.HapticEvent
 import com.metrolist.shared.ui.haptics.rememberMetrolistHaptics
+import com.metrolist.shared.ui.icons.MetrolistIcons
 import com.metrolist.shared.ui.menu.artworkMenuActions
 import com.metrolist.shared.ui.menu.onSecondaryClick
 import com.metrolist.shared.ui.navigation.NavigationBackHandler
@@ -123,6 +129,7 @@ fun PlaylistContent(
     durationSongs: List<SongItem> = artworkSongs,
     hasMoreSongs: Boolean = false,
     hiddenSongCount: Int = 0,
+    loadedSongCount: Int = artworkSongs.size + hiddenSongCount,
     isLoading: Boolean = false,
     previewThumbnail: String? = null,
     loadingHeader: (@Composable () -> Unit)? = null,
@@ -143,8 +150,13 @@ fun PlaylistContent(
     preparedSongKeys: List<String>? = null,
     contentPadding: PaddingValues = PaddingValues(0.dp),
     currentSongId: String? = null,
+    currentQueueItemId: String? = null,
+    currentSongOccurrenceKey: String? = null,
     isPlaying: Boolean = false,
     suggestions: List<SongItem> = emptyList(),
+    onAddSuggestion: ((SongItem) -> Unit)? = null,
+    isAddingSuggestion: Boolean = false,
+    suggestionFooter: (@Composable () -> Unit)? = null,
     downloadedSongIds: Set<String> = emptySet(),
     onArtistClick: ((String) -> Unit)? = null,
     header: @Composable (() -> Unit)? = null,
@@ -170,13 +182,14 @@ fun PlaylistContent(
     onAddSong: (() -> Unit)? = null,
 ) {
     val currentSongIdState = rememberUpdatedState(currentSongId)
+    val currentQueueItemIdState = rememberUpdatedState(currentQueueItemId)
+    val currentSongOccurrenceKeyState = rememberUpdatedState(currentSongOccurrenceKey)
     val isPlayingState = rememberUpdatedState(isPlaying)
     val canEdit = playlist?.canEdit == true
     val onAddSong = onAddSong.takeIf { canEdit }
     val onEdit = onEdit.takeIf { canEdit }
     val headerPlaylist = remember(playlist, artworkSongs) { playlist?.withLocalArtwork(artworkSongs) }
     val reportedSongCount = playlist?.songCount?.takeIf { it.isNotBlank() }
-    val loadedSongCount = artworkSongs.size + hiddenSongCount
     val totalSongLabel =
         reportedSongCount?.toIntOrNull()?.let { text.songCount(it) }
             ?: reportedSongCount
@@ -234,8 +247,13 @@ fun PlaylistContent(
             }
         }
     val displayedSongs = remember(songs, displayedIndices) { displayedIndices?.map(songs::get) ?: songs }
-    val songKeys = preparedSongKeys ?: remember(displayedSongs) { displayedSongs.playlistLazyItemKeys() }
     val effectiveSuggestions = suggestions.takeIf { effectiveQuery.isBlank() }.orEmpty()
+    val preferQueueItemIdState =
+        rememberUpdatedState(
+            currentQueueItemId != null &&
+                (displayedSongs.any { it.id == currentQueueItemId } || effectiveSuggestions.any { it.id == currentQueueItemId }),
+        )
+    val songKeys = preparedSongKeys ?: remember(displayedSongs) { displayedSongs.playlistLazyItemKeys() }
 
     val isTv = LocalIsTv.current
     var tvScrollTarget by remember(playlist?.id) { mutableStateOf<TvReorderScrollTarget?>(null) }
@@ -487,6 +505,9 @@ fun PlaylistContent(
                                                     sourceIndex = displayedIndices?.get(index) ?: index,
                                                     itemKey = songKeys[index],
                                                     currentSongId = currentSongIdState,
+                                                    currentQueueItemId = currentQueueItemIdState,
+                                                    preferQueueItemId = preferQueueItemIdState,
+                                                    currentSongOccurrenceKey = currentSongOccurrenceKeyState,
                                                     isPlaying = isPlayingState,
                                                     isDownloaded = song.id in downloadedSongIds,
                                                     onTrackClick = onTrackClick,
@@ -505,7 +526,9 @@ fun PlaylistContent(
                                             if (paginationContent != null) {
                                                 item(key = "pagination") { paginationContent() }
                                             }
-                                            if (effectiveSuggestions.isNotEmpty()) {
+                                            if (effectiveSuggestions.isNotEmpty() ||
+                                                (suggestionFooter != null && effectiveQuery.isBlank())
+                                            ) {
                                                 item(key = "suggestions_title") {
                                                     Text(
                                                         text = text.suggestions,
@@ -521,10 +544,14 @@ fun PlaylistContent(
                                                 ) { index, song ->
                                                     PlaylistSuggestionItemRow(
                                                         song = song,
+                                                        onAddSuggestion = onAddSuggestion,
+                                                        isAddingSuggestion = isAddingSuggestion,
                                                         index = index,
                                                         count = effectiveSuggestions.size,
                                                         offset = displayedSongs.size,
                                                         currentSongId = currentSongIdState,
+                                                        currentQueueItemId = currentQueueItemIdState,
+                                                        preferQueueItemId = preferQueueItemIdState,
                                                         isPlaying = isPlayingState,
                                                         isDownloaded = song.id in downloadedSongIds,
                                                         onTrackClick = onTrackClick,
@@ -532,6 +559,11 @@ fun PlaylistContent(
                                                         onArtistClick = onArtistClick,
                                                         trackContainer = trackContainer,
                                                     )
+                                                }
+                                            }
+                                            suggestionFooter?.takeIf { effectiveQuery.isBlank() }?.let { footer ->
+                                                item(key = "suggestions_footer") {
+                                                    Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) { footer() }
                                                 }
                                             }
                                         }
@@ -674,6 +706,9 @@ fun PlaylistContent(
                                         itemKey = songKeys[index],
                                         modifier = itemModifier.padding(horizontal = CollectionHeaderHorizontalPadding),
                                         currentSongId = currentSongIdState,
+                                        currentQueueItemId = currentQueueItemIdState,
+                                        preferQueueItemId = preferQueueItemIdState,
+                                        currentSongOccurrenceKey = currentSongOccurrenceKeyState,
                                         isPlaying = isPlayingState,
                                         isDownloaded = song.id in downloadedSongIds,
                                         onTrackClick = onTrackClick,
@@ -693,7 +728,7 @@ fun PlaylistContent(
                             if (paginationContent != null) {
                                 item(key = "pagination") { paginationContent() }
                             }
-                            if (effectiveSuggestions.isNotEmpty()) {
+                            if (effectiveSuggestions.isNotEmpty() || (suggestionFooter != null && effectiveQuery.isBlank())) {
                                 item(key = "suggestions_title") {
                                     Box(itemModifier) {
                                         Text(
@@ -711,11 +746,15 @@ fun PlaylistContent(
                                 ) { index, song ->
                                     PlaylistSuggestionItemRow(
                                         song = song,
+                                        onAddSuggestion = onAddSuggestion,
+                                        isAddingSuggestion = isAddingSuggestion,
                                         index = index,
                                         count = effectiveSuggestions.size,
                                         offset = displayedSongs.size,
                                         modifier = itemModifier.padding(horizontal = CollectionHeaderHorizontalPadding),
                                         currentSongId = currentSongIdState,
+                                        currentQueueItemId = currentQueueItemIdState,
+                                        preferQueueItemId = preferQueueItemIdState,
                                         isPlaying = isPlayingState,
                                         isDownloaded = song.id in downloadedSongIds,
                                         onTrackClick = onTrackClick,
@@ -723,6 +762,11 @@ fun PlaylistContent(
                                         onArtistClick = onArtistClick,
                                         trackContainer = trackContainer,
                                     )
+                                }
+                            }
+                            suggestionFooter?.takeIf { effectiveQuery.isBlank() }?.let { footer ->
+                                item(key = "suggestions_footer") {
+                                    Box(itemModifier.fillMaxWidth(), contentAlignment = Alignment.Center) { footer() }
                                 }
                             }
 
@@ -770,6 +814,9 @@ private fun LazyItemScope.PlaylistSongItem(
     modifier: Modifier,
     container: @Composable (@Composable () -> Unit) -> Unit,
     currentSongId: State<String?>,
+    currentQueueItemId: State<String?>,
+    preferQueueItemId: State<Boolean>,
+    currentSongOccurrenceKey: State<String?>,
     isPlaying: State<Boolean>,
     isDownloaded: Boolean,
     onClick: () -> Unit,
@@ -784,7 +831,16 @@ private fun LazyItemScope.PlaylistSongItem(
     onMoveToTop: (() -> Unit)? = null,
     onMoveToBottom: (() -> Unit)? = null,
 ) {
-    val playback by rememberItemPlayback(song.id, currentSongId, isPlaying)
+    val playback by
+        rememberItemPlayback(
+            itemId = song.id,
+            currentQueueItemId = currentQueueItemId,
+            preferQueueItemId = preferQueueItemId,
+            currentSongId = currentSongId,
+            isPlaying = isPlaying,
+            occurrenceKey = song.playlistOccurrenceIdentity(),
+            currentOccurrenceKey = currentSongOccurrenceKey,
+        )
     val haptics = rememberMetrolistHaptics()
     if (reorderableState == null) {
         container {
@@ -867,6 +923,9 @@ private fun LazyItemScope.PlaylistSongItemRow(
     itemKey: String,
     modifier: Modifier = Modifier,
     currentSongId: State<String?>,
+    currentQueueItemId: State<String?>,
+    preferQueueItemId: State<Boolean>,
+    currentSongOccurrenceKey: State<String?>,
     isPlaying: State<Boolean>,
     isDownloaded: Boolean,
     onTrackClick: (SongItem, Int) -> Unit,
@@ -880,7 +939,16 @@ private fun LazyItemScope.PlaylistSongItemRow(
     onMove: (Int, Int) -> Unit,
     isSelected: Boolean,
 ) {
-    val playback by rememberItemPlayback(song.id, currentSongId, isPlaying)
+    val playback by
+        rememberItemPlayback(
+            itemId = song.id,
+            currentQueueItemId = currentQueueItemId,
+            preferQueueItemId = preferQueueItemId,
+            currentSongId = currentSongId,
+            isPlaying = isPlaying,
+            occurrenceKey = song.playlistOccurrenceIdentity(),
+            currentOccurrenceKey = currentSongOccurrenceKey,
+        )
     PlaylistSongItem(
         song = song,
         key = itemKey,
@@ -898,6 +966,9 @@ private fun LazyItemScope.PlaylistSongItemRow(
             }
         },
         currentSongId = currentSongId,
+        currentQueueItemId = currentQueueItemId,
+        preferQueueItemId = preferQueueItemId,
+        currentSongOccurrenceKey = currentSongOccurrenceKey,
         isPlaying = isPlaying,
         isDownloaded = isDownloaded,
         onClick = { onTrackClick(song, sourceIndex) },
@@ -917,11 +988,15 @@ private fun LazyItemScope.PlaylistSongItemRow(
 @Composable
 private fun PlaylistSuggestionItemRow(
     song: SongItem,
+    onAddSuggestion: ((SongItem) -> Unit)?,
+    isAddingSuggestion: Boolean,
     index: Int,
     count: Int,
     offset: Int,
     modifier: Modifier = Modifier,
     currentSongId: State<String?>,
+    currentQueueItemId: State<String?>,
+    preferQueueItemId: State<Boolean>,
     isPlaying: State<Boolean>,
     isDownloaded: Boolean,
     onTrackClick: (SongItem, Int) -> Unit,
@@ -929,7 +1004,7 @@ private fun PlaylistSuggestionItemRow(
     onArtistClick: ((String) -> Unit)?,
     trackContainer: @Composable (SongItem, Boolean, @Composable () -> Unit) -> Unit,
 ) {
-    val playback by rememberItemPlayback(song.id, currentSongId, isPlaying)
+    val playback by rememberItemPlayback(song.id, currentSongId, isPlaying, currentQueueItemId, preferQueueItemId)
     trackContainer(song, true) {
         GroupedListItem(index = index, count = count, modifier = modifier, isCurrent = playback.isCurrent) {
             SongListItem(
@@ -939,10 +1014,28 @@ private fun PlaylistSuggestionItemRow(
                 isPlaying = playback.isPlaying,
                 isDownloaded = isDownloaded,
                 onClick = { onTrackClick(song, offset + index) },
-                onShowMenu = { onTrackMenuClick(song, offset + index) },
+                // Suggestion rows are not playlist members, so their menu cannot remove them.
+                onShowMenu = if (onAddSuggestion != null) ({}) else ({ onTrackMenuClick(song, offset + index) }),
+                longClickEnabled = onAddSuggestion == null,
                 onArtistClick = onArtistClick,
                 showThumbnail = true,
                 clickableMetadata = isDesktop,
+                trailingContent =
+                    onAddSuggestion?.let { add ->
+                        {
+                            IconButton(
+                                onClick = { add(song) },
+                                enabled = !isAddingSuggestion && !song.isUnavailable,
+                                shapes = IconButtonDefaults.shapes(),
+                            ) {
+                                Icon(
+                                    MetrolistIcons.Default.Add,
+                                    contentDescription = stringResource(Res.string.add_to_playlist),
+                                    modifier = Modifier.size(20.dp),
+                                )
+                            }
+                        }
+                    },
             )
         }
     }

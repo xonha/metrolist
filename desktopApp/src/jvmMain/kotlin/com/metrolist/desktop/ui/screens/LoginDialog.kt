@@ -12,6 +12,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
@@ -36,7 +37,6 @@ import androidx.compose.ui.input.key.key
 import androidx.compose.ui.input.key.type
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.window.DialogWindow
 import androidx.compose.ui.window.rememberDialogState
 import com.metrolist.desktop.auth.readWindowsLoginHelperOutput
 import com.metrolist.desktop.ui.DesktopDensityProvider
@@ -44,16 +44,21 @@ import com.metrolist.desktop.ui.components.WebViewAvailabilityLoading
 import com.metrolist.desktop.ui.components.WebViewUnavailableContent
 import com.metrolist.desktop.ui.components.rememberLinuxWebKitAvailable
 import com.metrolist.desktop.utils.prepareDesktopWebViewDataDirectory
-import com.metrolist.desktop.web.DesktopWebView
+import com.metrolist.desktop.web.DesktopBrowser
+import com.metrolist.desktop.web.rememberDesktopBrowser
 import com.metrolist.desktop.window.ClearWindowContentOnDispose
+import com.metrolist.desktop.window.DesktopDialogWindow
 import com.metrolist.innertubex.models.response.AccountsListResponse
 import com.metrolist.shared.auth.AccountDiscoveryAction
 import com.metrolist.shared.auth.AuthManager
 import com.metrolist.shared.auth.accountDiscoveryAction
+import com.metrolist.shared.auth.isSelectableForLogin
 import com.metrolist.shared.auth.selectionDataSyncId
+import com.metrolist.shared.auth.singleAccountDataSyncId
 import com.metrolist.shared.generated.resources.Res
 import com.metrolist.shared.generated.resources.account_picker_subtitle
 import com.metrolist.shared.generated.resources.account_picker_title
+import com.metrolist.shared.generated.resources.authentication_data_extraction_failed
 import com.metrolist.shared.generated.resources.cancel
 import com.metrolist.shared.generated.resources.channel_switch_browse_hint
 import com.metrolist.shared.generated.resources.channel_switch_recovery_hint
@@ -90,12 +95,6 @@ import com.metrolist.shared.ui.utils.verticalScrollWithDrag
 import com.metrolist.shared.utils.OsUtil
 import com.metrolist.shared.utils.clearWebCookies
 import com.metrolist.shared.youtube.logging.YtLogger
-import io.github.kdroidfilter.webview.cookie.Cookie
-import io.github.kdroidfilter.webview.cookie.CookieManager
-import io.github.kdroidfilter.webview.web.LoadingState
-import io.github.kdroidfilter.webview.web.WebViewNavigator
-import io.github.kdroidfilter.webview.web.rememberWebViewNavigator
-import io.github.kdroidfilter.webview.web.rememberWebViewState
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.currentCoroutineContext
@@ -165,7 +164,7 @@ fun LoginDialog(
     val colorScheme = MaterialTheme.colorScheme
     val typography = MaterialTheme.typography
     val shapes = MaterialTheme.shapes
-    DialogWindow(
+    DesktopDialogWindow(
         onCloseRequest = requestDismiss,
         title =
             if (isSwitchingChannel) {
@@ -178,11 +177,11 @@ fun LoginDialog(
         state = rememberDialogState(width = 600.dp, height = 700.dp),
         visible = true,
     ) {
-        ClearWindowContentOnDispose(window)
+        ClearWindowContentOnDispose(awtDialog)
         MaterialTheme(colorScheme = colorScheme, typography = typography, shapes = shapes) {
             Surface(Modifier.fillMaxSize()) {
                 DesktopDensityProvider {
-                    val webKitAvailable = rememberLinuxWebKitAvailable()
+                    val webKitAvailable = rememberLinuxWebKitAvailable(waylandHostSupported = true)
                     if (cleanupRequested) {
                         LaunchedEffect(cleanupAttempt) {
                             delay(250L.milliseconds)
@@ -222,6 +221,7 @@ fun LoginDialog(
                         }
                     } else if (OsUtil.isWindows && isSwitchingChannel) {
                         WindowsAccountContent(
+                            isSwitchingChannel = true,
                             onAuthDataExtracted = { cookie, visitorData, dataSyncId, authUser ->
                                 loginCompleted = true
                                 onAuthDataExtracted(cookie, visitorData, dataSyncId, authUser)
@@ -229,7 +229,8 @@ fun LoginDialog(
                             onDismissRequest = requestDismiss,
                         )
                     } else if (OsUtil.isWindows) {
-                        WindowsHelperContent(
+                        WindowsAccountContent(
+                            isSwitchingChannel = false,
                             onAuthDataExtracted = { cookie, visitorData, dataSyncId, authUser ->
                                 loginCompleted = true
                                 onAuthDataExtracted(cookie, visitorData, dataSyncId, authUser)
@@ -268,6 +269,7 @@ fun LoginDialog(
 
 @Composable
 private fun WindowsAccountContent(
+    isSwitchingChannel: Boolean,
     onAuthDataExtracted: (cookie: String, visitorData: String, dataSyncId: String, authUser: String) -> Unit,
     onDismissRequest: () -> Unit,
 ) {
@@ -281,19 +283,35 @@ private fun WindowsAccountContent(
     var busy by remember { mutableStateOf(true) }
     var failed by remember { mutableStateOf(false) }
     var needsLogin by remember { mutableStateOf(!authManager.isLoggedIn) }
+    var helperLaunchedFromPicker by remember { mutableStateOf(false) }
+    var helperCompletedFromPicker by remember { mutableStateOf(false) }
     var loginUrl by remember { mutableStateOf<String?>(null) }
+    var completedSignInUrl by remember { mutableStateOf<String?>(null) }
 
     LaunchedEffect(authData, needsLogin) {
         if (!needsLogin) {
             busy = true
             failed = false
             try {
-                accounts =
-                    authManager
-                        .fetchAccounts(authData.cookie, authData.visitorData, authData.dataSyncId, authData.authUser)
-                        .filter { authData.forAccount(it) != null || !it.signinUrl.isNullOrBlank() }
-                selectedAccount = accounts.firstOrNull { it.isSelected } ?: accounts.firstOrNull()
+                accounts = authManager.fetchAccounts(authData.cookie, authData.visitorData, authData.dataSyncId, authData.authUser)
+                selectedAccount =
+                    accounts.firstOrNull { it.isSelected && it.isSelectableForLogin(authData.dataSyncId) }
+                        ?: accounts.firstOrNull { it.isSelectableForLogin(authData.dataSyncId) }
                 failed = accounts.isEmpty()
+                if (accountDiscoveryAction(accounts.size, isSwitchingChannel) == AccountDiscoveryAction.COMPLETE_LOGIN) {
+                    val candidate = authData.copy(dataSyncId = singleAccountDataSyncId(authData.dataSyncId, accounts))
+                    if (authManager.validateAndSaveCredentials(
+                            candidate.cookie,
+                            candidate.visitorData,
+                            candidate.dataSyncId,
+                            candidate.authUser,
+                        )
+                    ) {
+                        onAuthDataExtracted(candidate.cookie, candidate.visitorData, candidate.dataSyncId, candidate.authUser)
+                    } else {
+                        failed = true
+                    }
+                }
             } catch (e: CancellationException) {
                 throw e
             } catch (error: Exception) {
@@ -308,23 +326,27 @@ private fun WindowsAccountContent(
     if (needsLogin) {
         WindowsHelperContent(
             onAuthDataExtracted = { cookie, visitorData, dataSyncId, authUser ->
-                if (loginUrl != null) {
-                    onAuthDataExtracted(cookie, visitorData, dataSyncId, authUser)
-                } else {
-                    authData = AuthData(cookie, visitorData, dataSyncId, authUser)
-                    accounts = emptyList()
-                    selectedAccount = null
-                    busy = true
-                    needsLogin = false
-                }
-            },
-            onDismissRequest = {
+                authData = AuthData(cookie, visitorData, dataSyncId, authUser)
+                accounts = emptyList()
+                selectedAccount = null
+                failed = false
+                busy = true
+                helperCompletedFromPicker = helperLaunchedFromPicker
+                helperLaunchedFromPicker = false
+                completedSignInUrl = loginUrl
                 loginUrl = null
                 needsLogin = false
             },
+            onDismissRequest = {
+                loginUrl = null
+                if (helperLaunchedFromPicker) {
+                    helperLaunchedFromPicker = false
+                    needsLogin = false
+                } else {
+                    onDismissRequest()
+                }
+            },
             loginUrl = loginUrl,
-            // Refreshing the list must not save the helper's default channel.
-            validateCredentials = loginUrl != null,
         )
         return
     }
@@ -334,12 +356,24 @@ private fun WindowsAccountContent(
         if (accounts.isNotEmpty()) Text(stringResource(Res.string.account_picker_subtitle))
         if (busy) ContainedLoadingIndicator()
         if (failed) {
-            Text(stringResource(Res.string.channel_switch_unavailable), color = MaterialTheme.colorScheme.error)
-            Text(stringResource(Res.string.channel_switch_recovery_hint))
+            if (isSwitchingChannel) {
+                Text(stringResource(Res.string.channel_switch_unavailable), color = MaterialTheme.colorScheme.error)
+                Text(stringResource(Res.string.channel_switch_recovery_hint))
+            } else {
+                Text(stringResource(Res.string.authentication_data_extraction_failed), color = MaterialTheme.colorScheme.error)
+            }
         }
         Column(Modifier.fillMaxWidth().weight(1f).verticalScrollWithDrag(rememberScrollState())) {
-            AccountPickerList(accounts, selectedAccount, onAccountSelected = { if (!busy) selectedAccount = it })
+            AccountPickerList(
+                accounts.filter { it.isSelectableForLogin(authData.dataSyncId) },
+                selectedAccount,
+                onAccountSelected = { if (!busy) selectedAccount = it },
+            )
         }
+        val canCompleteWithExistingCredentials =
+            accounts.none { it.isSelectableForLogin(authData.dataSyncId) } &&
+                authData.cookie.isNotBlank() && authData.dataSyncId.isNotBlank() &&
+                (!isSwitchingChannel || helperCompletedFromPicker)
         FlowRow(
             horizontalArrangement = Arrangement.spacedBy(8.dp),
             verticalArrangement = Arrangement.spacedBy(8.dp),
@@ -349,46 +383,88 @@ private fun WindowsAccountContent(
                 enabled = !busy,
                 onClick = {
                     loginUrl = null
+                    helperLaunchedFromPicker = true
                     needsLogin = true
                 },
                 shapes = ButtonDefaults.shapes(),
             ) { Text(stringResource(Res.string.channel_switch_sign_in_again)) }
             Button(
-                enabled = !busy && selectedAccount != null,
+                enabled = !busy && (selectedAccount != null || canCompleteWithExistingCredentials),
                 onClick = {
-                    val selected = selectedAccount ?: return@Button
+                    val selected = selectedAccount
                     scope.launch {
                         busy = true
                         failed = false
                         try {
-                            val handled =
-                                selectWebViewAccount(
-                                    authData,
-                                    selected,
-                                    validateAndComplete = { candidate ->
-                                        if (authManager.validateAndSaveCredentials(
-                                                candidate.cookie,
-                                                candidate.visitorData,
-                                                candidate.dataSyncId,
-                                                candidate.authUser,
-                                            )
-                                        ) {
-                                            onAuthDataExtracted(
-                                                candidate.cookie,
-                                                candidate.visitorData,
-                                                candidate.dataSyncId,
-                                                candidate.authUser,
-                                            )
-                                        } else {
-                                            failed = true
-                                        }
-                                    },
-                                    navigate = { url ->
-                                        loginUrl = url
-                                        needsLogin = true
-                                    },
-                                )
-                            if (!handled) failed = true
+                            if (selected == null) {
+                                if (authManager.validateAndSaveCredentials(
+                                        authData.cookie,
+                                        authData.visitorData,
+                                        authData.dataSyncId,
+                                        authData.authUser,
+                                    )
+                                ) {
+                                    onAuthDataExtracted(
+                                        authData.cookie,
+                                        authData.visitorData,
+                                        authData.dataSyncId,
+                                        authData.authUser,
+                                    )
+                                } else {
+                                    failed = true
+                                }
+                            } else {
+                                val handled =
+                                    selectWebViewAccount(
+                                        authData,
+                                        selected,
+                                        validateAndComplete = { candidate ->
+                                            if (authManager.validateAndSaveCredentials(
+                                                    candidate.cookie,
+                                                    candidate.visitorData,
+                                                    candidate.dataSyncId,
+                                                    candidate.authUser,
+                                                )
+                                            ) {
+                                                onAuthDataExtracted(
+                                                    candidate.cookie,
+                                                    candidate.visitorData,
+                                                    candidate.dataSyncId,
+                                                    candidate.authUser,
+                                                )
+                                            } else {
+                                                failed = true
+                                            }
+                                        },
+                                        navigate = { url ->
+                                            if (url == completedSignInUrl) {
+                                                val resolved =
+                                                    authData.dataSyncId.isNotBlank() &&
+                                                        authManager.validateAndSaveCredentials(
+                                                            authData.cookie,
+                                                            authData.visitorData,
+                                                            authData.dataSyncId,
+                                                            authData.authUser,
+                                                        )
+                                                if (resolved) {
+                                                    onAuthDataExtracted(
+                                                        authData.cookie,
+                                                        authData.visitorData,
+                                                        authData.dataSyncId,
+                                                        authData.authUser,
+                                                    )
+                                                } else {
+                                                    failed = true
+                                                }
+                                            } else {
+                                                loginUrl = url
+                                                helperLaunchedFromPicker = true
+                                                needsLogin = true
+                                            }
+                                        },
+                                    )
+                                if (!handled) failed = true
+                            }
                         } catch (e: CancellationException) {
                             throw e
                         } catch (error: Exception) {
@@ -410,7 +486,6 @@ private fun WindowsHelperContent(
     onAuthDataExtracted: (cookie: String, visitorData: String, dataSyncId: String, authUser: String) -> Unit,
     onDismissRequest: () -> Unit,
     loginUrl: String? = null,
-    validateCredentials: Boolean = true,
 ) {
     val coroutineScope = rememberCoroutineScope()
     var status by remember { mutableStateOf<WindowsLoginStatus>(WindowsLoginStatus.Ready) }
@@ -456,18 +531,7 @@ private fun WindowsHelperContent(
                             dataSyncId = json["dataSyncId"]?.jsonPrimitive?.content.orEmpty(),
                             authUser = json["authUser"]?.jsonPrimitive?.content.orEmpty(),
                         )
-                    if (
-                        authData.cookie.isNotBlank() &&
-                        (
-                            !validateCredentials ||
-                                AuthManager().validateAndSaveCredentials(
-                                    authData.cookie,
-                                    authData.visitorData,
-                                    authData.dataSyncId,
-                                    authData.authUser,
-                                )
-                        )
-                    ) {
+                    if (authData.cookie.isNotBlank()) {
                         status = WindowsLoginStatus.Success
                         onAuthDataExtracted(authData.cookie, authData.visitorData, authData.dataSyncId, authData.authUser)
                     } else {
@@ -550,15 +614,14 @@ private fun WebViewContent(
         } else {
             "https://accounts.google.com/ServiceLogin?continue=https%3A%2F%2Fmusic.youtube.com"
         }
-    val webViewState =
-        rememberWebViewState(initialUrl).apply {
-            webSettings.backgroundColor = MaterialTheme.colorScheme.surface
-            webSettings.desktopWebSettings.transparent = false
-            webSettings.desktopWebSettings.dataDirectory = webViewDataDirectory.getOrNull()
-            webSettings.desktopWebSettings.initScript = LOGIN_WEBVIEW_INIT_SCRIPT
-            webSettings.customUserAgentString = buildBrowserUserAgent()
-        }
-    val navigator = rememberWebViewNavigator()
+    val browser =
+        rememberDesktopBrowser(
+            initialUrl = initialUrl,
+            userAgent = buildBrowserUserAgent(),
+            dataDirectory = File(webViewDataDirectory.getOrThrow()),
+            initScript = LOGIN_WEBVIEW_INIT_SCRIPT,
+            backgroundColor = MaterialTheme.colorScheme.surface,
+        )
     val coroutineScope = rememberCoroutineScope()
     var loginStage by remember { mutableStateOf(LoginStage.Authenticating) }
     var pendingAuthData by remember { mutableStateOf<AuthData?>(null) }
@@ -572,8 +635,8 @@ private fun WebViewContent(
     suspend fun extractAuthData(): AuthData? {
         if (hasCompletedLogin) return null
         return awaitProviderCredentials {
-            if (webViewState.loadingState is LoadingState.Finished && isYouTubeMusicUrl(webViewState.lastLoadedUrl)) {
-                readWebViewAuthData(webViewState.cookieManager) { script -> evaluateJs(navigator, script) }
+            if (isYouTubeMusicUrl(browser.finishedUrl)) {
+                readWebViewAuthData(browser)
             } else {
                 null
             }
@@ -625,7 +688,9 @@ private fun WebViewContent(
             AccountDiscoveryAction.SELECT_ACCOUNT -> {
                 pendingAuthData = authData
                 pendingAccounts = accounts
-                selectedAccount = accounts.firstOrNull { it.isSelected } ?: accounts.firstOrNull()
+                selectedAccount =
+                    accounts.firstOrNull { it.isSelected && it.isSelectableForLogin(authData.dataSyncId.orEmpty()) }
+                        ?: accounts.firstOrNull { it.isSelectableForLogin(authData.dataSyncId.orEmpty()) }
                 loginStage = LoginStage.SelectingAccount
             }
 
@@ -634,15 +699,16 @@ private fun WebViewContent(
             }
 
             AccountDiscoveryAction.COMPLETE_LOGIN -> {
-                finalizeLogin(authData)
+                val dataSyncId = singleAccountDataSyncId(authData.dataSyncId, accounts)
+                finalizeLogin(authData.copy(dataSyncId = dataSyncId))
             }
         }
     }
 
-    LaunchedEffect(webViewState, navigator, completionAttempt) {
-        snapshotFlow { webViewState.loadingState to webViewState.lastLoadedUrl }
-            .collect { (loadingState, lastLoadedUrl) ->
-                if (hasCompletedLogin || loadingState !is LoadingState.Finished || !isYouTubeMusicUrl(lastLoadedUrl)) {
+    LaunchedEffect(browser, completionAttempt) {
+        snapshotFlow { browser.finishedUrl }
+            .collect { finishedUrl ->
+                if (hasCompletedLogin || !isYouTubeMusicUrl(finishedUrl)) {
                     return@collect
                 }
 
@@ -667,6 +733,7 @@ private fun WebViewContent(
         WebViewPromptWindow(
             onCloseRequest = { validationFailed = false },
             title = stringResource(Res.string.error),
+            height = 240.dp,
             text = { Text(stringResource(Res.string.login_failed_with_error, stringResource(Res.string.error))) },
             confirmButton = {
                 Button(onClick = { validationFailed = false }, shapes = ButtonDefaults.shapes()) {
@@ -683,11 +750,7 @@ private fun WebViewContent(
                 modifier = Modifier.fillMaxWidth().padding(16.dp),
             )
         }
-        DesktopWebView(
-            state = webViewState,
-            navigator = navigator,
-            modifier = Modifier.fillMaxWidth().weight(1f),
-        )
+        browser.Content(Modifier.fillMaxWidth().weight(1f))
         // Native WebViews draw above Compose overlays, so keep completion controls outside the browser.
         Row(
             modifier = Modifier.fillMaxWidth().padding(16.dp),
@@ -716,10 +779,15 @@ private fun WebViewContent(
             WebViewPromptWindow(
                 onCloseRequest = onDismissRequest,
                 title = stringResource(Res.string.account_picker_title),
+                height = 560.dp,
                 text = {
                     Column(verticalArrangement = Arrangement.spacedBy(16.dp)) {
                         Text(stringResource(Res.string.account_picker_subtitle))
-                        AccountPickerList(accounts, selectedAccount, onAccountSelected = { selectedAccount = it })
+                        AccountPickerList(
+                            accounts.filter { it.isSelectableForLogin(pendingAuthData?.dataSyncId.orEmpty()) },
+                            selectedAccount,
+                            onAccountSelected = { selectedAccount = it },
+                        )
                     }
                 },
                 confirmButton = {
@@ -736,7 +804,7 @@ private fun WebViewContent(
                                         validateAndComplete = { finalizeLogin(it) },
                                         navigate = { url ->
                                             loginStage = LoginStage.SwitchingAccount
-                                            navigator.loadUrl(url)
+                                            browser.loadUrl(url)
                                         },
                                     )
                                 ) {
@@ -757,10 +825,12 @@ private fun WebViewContent(
 }
 
 // Compose dialogs share the parent canvas and can be covered by the native WebView.
+// A fixed, resizable window keeps the buttons visible: content-sized windows are measured before the Wayland scale applies.
 @Composable
 private fun WebViewPromptWindow(
     onCloseRequest: () -> Unit,
     title: String,
+    height: Dp,
     text: @Composable () -> Unit,
     confirmButton: @Composable () -> Unit,
     dismissButton: @Composable () -> Unit = {},
@@ -768,11 +838,10 @@ private fun WebViewPromptWindow(
     val colorScheme = MaterialTheme.colorScheme
     val typography = MaterialTheme.typography
     val shapes = MaterialTheme.shapes
-    DialogWindow(
+    DesktopDialogWindow(
         onCloseRequest = onCloseRequest,
         title = title,
-        state = rememberDialogState(width = 480.dp, height = Dp.Unspecified),
-        resizable = false,
+        state = rememberDialogState(width = 480.dp, height = height),
         onPreviewKeyEvent = { event ->
             if (event.key == Key.Escape && event.type == KeyEventType.KeyDown) {
                 onCloseRequest()
@@ -782,21 +851,25 @@ private fun WebViewPromptWindow(
             }
         },
     ) {
-        ClearWindowContentOnDispose(window)
+        ClearWindowContentOnDispose(awtDialog)
         MaterialTheme(colorScheme = colorScheme, typography = typography, shapes = shapes) {
             DesktopDensityProvider {
-                Surface(Modifier.fillMaxWidth()) {
-                    Column(Modifier.padding(24.dp), verticalArrangement = Arrangement.spacedBy(16.dp)) {
+                Surface(Modifier.fillMaxSize()) {
+                    Column(Modifier.fillMaxSize().padding(24.dp), verticalArrangement = Arrangement.spacedBy(16.dp)) {
                         Text(title, style = MaterialTheme.typography.headlineSmall)
-                        Column(Modifier.fillMaxWidth().heightIn(max = 420.dp).verticalScrollWithDrag(rememberScrollState())) {
+                        Column(Modifier.fillMaxWidth().weight(1f).verticalScrollWithDrag(rememberScrollState())) {
                             text()
                         }
-                        FlowRow(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.End),
-                            verticalArrangement = Arrangement.spacedBy(8.dp),
+                        Row(
+                            modifier =
+                                Modifier
+                                    .fillMaxWidth()
+                                    .heightIn(min = 48.dp),
+                            horizontalArrangement = Arrangement.End,
+                            verticalAlignment = Alignment.CenterVertically,
                         ) {
                             dismissButton()
+                            Spacer(Modifier.width(8.dp))
                             confirmButton()
                         }
                     }
@@ -822,7 +895,7 @@ internal suspend fun selectWebViewAccount(
     authData: AuthData,
     account: AccountsListResponse.Account,
     validateAndComplete: suspend (AuthData) -> Unit,
-    navigate: (String) -> Unit,
+    navigate: suspend (String) -> Unit,
 ): Boolean {
     val candidate = authData.forAccount(account)
     if (candidate != null) {
@@ -889,8 +962,16 @@ private data class WebViewAuthConfig(
     val authUser: String,
 )
 
-internal suspend fun readWebViewAuthData(
-    cookieManager: CookieManager,
+internal suspend fun readWebViewAuthData(browser: DesktopBrowser): AuthData? =
+    readAuthData(
+        cookiesFor = { url -> browser.cookies(url).map { it.name to it.value } },
+        nativeCookies = { browser.storedCookies().map { it.name to it.value } },
+        evaluateJavaScript = { script -> withTimeoutOrNull(2000L.milliseconds) { browser.evaluateJavaScript(script) }.orEmpty() },
+    )
+
+private suspend fun readAuthData(
+    cookiesFor: suspend (String) -> List<Pair<String, String>>,
+    nativeCookies: suspend () -> List<Pair<String, String>>,
     evaluateJavaScript: suspend (String) -> String,
 ): AuthData? {
     val config =
@@ -903,16 +984,16 @@ internal suspend fun readWebViewAuthData(
 
     val urlCookies =
         try {
-            val musicCookies = cookieManager.getCookies("https://music.youtube.com")
-            val youtubeCookies = cookieManager.getCookies("https://www.youtube.com") + cookieManager.getCookies("https://youtube.com")
-            val googleCookies = cookieManager.getCookies("https://accounts.google.com") + cookieManager.getCookies("https://google.com")
+            val musicCookies = cookiesFor("https://music.youtube.com")
+            val youtubeCookies = cookiesFor("https://www.youtube.com") + cookiesFor("https://youtube.com")
+            val googleCookies = cookiesFor("https://accounts.google.com") + cookiesFor("https://google.com")
             buildCookiePairs(musicCookies, youtubeCookies + googleCookies)
         } catch (e: CancellationException) {
             throw e
         } catch (_: Exception) {
             emptyList()
         }
-    val nativeCookies = if (hasAuthCookie(buildCookieString(urlCookies))) emptyList() else readNativeCookiePairs(cookieManager)
+    val nativeCookies = if (hasAuthCookie(buildCookieString(urlCookies))) emptyList() else nativeCookies()
     val jsCookies =
         config.cookie
             .split(';')
@@ -930,26 +1011,6 @@ internal suspend fun readWebViewAuthData(
     )
 }
 
-private suspend fun evaluateJs(
-    navigator: WebViewNavigator,
-    script: String,
-): String =
-    try {
-        withTimeoutOrNull(2000L.milliseconds) {
-            suspendCancellableCoroutine { continuation ->
-                navigator.evaluateJavaScript(script) { result ->
-                    if (continuation.isActive) {
-                        continuation.resume(result)
-                    }
-                }
-            }
-        } ?: ""
-    } catch (e: CancellationException) {
-        throw e
-    } catch (_: Exception) {
-        ""
-    }
-
 private fun buildBrowserUserAgent(): String {
     val platformToken =
         when {
@@ -964,18 +1025,18 @@ private fun buildBrowserUserAgent(): String {
 }
 
 private fun buildCookiePairs(
-    primaryCookies: List<Cookie>,
-    fallbackCookies: List<Cookie>,
+    primaryCookies: List<Pair<String, String>>,
+    fallbackCookies: List<Pair<String, String>>,
 ): List<Pair<String, String>> {
     val cookieByName = LinkedHashMap<String, String>()
-    for (cookie in primaryCookies) {
-        if (cookie.name.isNotBlank()) {
-            cookieByName[cookie.name] = cookie.value
+    for ((name, value) in primaryCookies) {
+        if (name.isNotBlank()) {
+            cookieByName[name] = value
         }
     }
-    for (cookie in fallbackCookies) {
-        if (cookie.name.isNotBlank() && !cookieByName.containsKey(cookie.name)) {
-            cookieByName[cookie.name] = cookie.value
+    for ((name, value) in fallbackCookies) {
+        if (name.isNotBlank() && !cookieByName.containsKey(name)) {
+            cookieByName[name] = value
         }
     }
     return cookieByName.map { it.key to it.value }
@@ -986,27 +1047,3 @@ private fun buildCookieString(cookies: List<Pair<String, String>>): String =
         .filter { it.first.isNotBlank() }
         .distinctBy { it.first }
         .joinToString(separator = "; ") { "${it.first}=${it.second}" }
-
-private suspend fun readNativeCookiePairs(cookieManager: Any): List<Pair<String, String>> =
-    withContext(Dispatchers.IO) {
-        runCatching {
-            val panelField = cookieManager.javaClass.getDeclaredField("panel").apply { isAccessible = true }
-            val panel = panelField.get(cookieManager) ?: return@runCatching emptyList()
-            val cookies = panel.javaClass.getMethod("getCookies").invoke(panel) as? List<*> ?: return@runCatching emptyList()
-            cookies.mapNotNull { cookie ->
-                cookie ?: return@mapNotNull null
-                val domain =
-                    (cookie.javaClass.getMethod("getDomain").invoke(cookie) as? String)
-                        ?.removePrefix(".")
-                        ?.lowercase() ?: return@mapNotNull null
-                if (domain != "youtube.com" && !domain.endsWith(".youtube.com") &&
-                    domain != "google.com" && !domain.endsWith(".google.com")
-                ) {
-                    return@mapNotNull null
-                }
-                val name = cookie.javaClass.getMethod("getName").invoke(cookie) as? String ?: return@mapNotNull null
-                val value = cookie.javaClass.getMethod("getValue").invoke(cookie) as? String ?: return@mapNotNull null
-                name to value
-            }
-        }.getOrDefault(emptyList())
-    }

@@ -36,6 +36,7 @@ import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
+import androidx.compose.material3.pulltorefresh.PullToRefreshBox
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
@@ -60,7 +61,9 @@ import com.metrolist.android.LocalMiniPlayerBottomInset
 import com.metrolist.android.update.AppUpdateManager
 import com.metrolist.android.update.AppUpdateState
 import com.metrolist.android.update.GitHubRelease
+import com.metrolist.android.update.PrivilegedAccess
 import com.metrolist.android.update.UpdateFailure
+import com.metrolist.android.update.UpdateInstallMethod
 import com.metrolist.android.update.formatReleaseAge
 import com.metrolist.shared.generated.resources.Res
 import com.metrolist.shared.generated.resources.action_download
@@ -81,6 +84,7 @@ import com.metrolist.shared.generated.resources.crash_updates_date
 import com.metrolist.shared.generated.resources.crash_updates_digest_failed
 import com.metrolist.shared.generated.resources.crash_updates_download_failed
 import com.metrolist.shared.generated.resources.crash_updates_error
+import com.metrolist.shared.generated.resources.crash_updates_force_install
 import com.metrolist.shared.generated.resources.crash_updates_install
 import com.metrolist.shared.generated.resources.crash_updates_installer_failed
 import com.metrolist.shared.generated.resources.crash_updates_installing_description
@@ -98,6 +102,8 @@ import com.metrolist.shared.generated.resources.settings_release_overview
 import com.metrolist.shared.generated.resources.settings_share_apk_summary
 import com.metrolist.shared.generated.resources.update_pending
 import com.metrolist.shared.generated.resources.updates_auto_check
+import com.metrolist.shared.generated.resources.updates_auto_install
+import com.metrolist.shared.generated.resources.updates_auto_install_desc
 import com.metrolist.shared.generated.resources.updates_changelog
 import com.metrolist.shared.generated.resources.updates_changelogs
 import com.metrolist.shared.generated.resources.updates_check
@@ -106,7 +112,13 @@ import com.metrolist.shared.generated.resources.updates_date
 import com.metrolist.shared.generated.resources.updates_digest_failed
 import com.metrolist.shared.generated.resources.updates_download_failed
 import com.metrolist.shared.generated.resources.updates_error
+import com.metrolist.shared.generated.resources.updates_force_install
 import com.metrolist.shared.generated.resources.updates_install
+import com.metrolist.shared.generated.resources.updates_install_method
+import com.metrolist.shared.generated.resources.updates_install_method_desc
+import com.metrolist.shared.generated.resources.updates_install_method_root
+import com.metrolist.shared.generated.resources.updates_install_method_shizuku
+import com.metrolist.shared.generated.resources.updates_install_method_system
 import com.metrolist.shared.generated.resources.updates_installer_failed
 import com.metrolist.shared.generated.resources.updates_installing_description
 import com.metrolist.shared.generated.resources.updates_installing_title
@@ -120,9 +132,12 @@ import com.metrolist.shared.generated.resources.updates_pending_title
 import com.metrolist.shared.generated.resources.updates_release_date_age
 import com.metrolist.shared.generated.resources.updates_release_unavailable
 import com.metrolist.shared.generated.resources.updates_retry
+import com.metrolist.shared.generated.resources.updates_root_unavailable
 import com.metrolist.shared.generated.resources.updates_share_apk
 import com.metrolist.shared.generated.resources.updates_share_apk_error
 import com.metrolist.shared.generated.resources.updates_share_app
+import com.metrolist.shared.generated.resources.updates_shizuku_denied
+import com.metrolist.shared.generated.resources.updates_shizuku_unavailable
 import com.metrolist.shared.generated.resources.updates_size
 import com.metrolist.shared.generated.resources.updates_status_current
 import com.metrolist.shared.generated.resources.updates_title
@@ -164,10 +179,17 @@ fun UpdatesScreen(
     var expandedRelease by remember { mutableStateOf<GitHubRelease?>(null) }
 
     var notificationsAllowed by remember { mutableStateOf(NotificationManagerCompat.from(context).areNotificationsEnabled()) }
+    var installMethod by remember { mutableStateOf(AppUpdateManager.installMethod()) }
+    var autoInstall by remember { mutableStateOf(AppSettings.shared.autoInstallUpdates) }
+    var canAutoInstall by remember { mutableStateOf(AppUpdateManager.canInstallWithoutPrompt(context)) }
     LifecycleResumeEffect(context) {
         notificationsAllowed = NotificationManagerCompat.from(context).areNotificationsEnabled()
+        canAutoInstall = AppUpdateManager.canInstallWithoutPrompt(context)
         onPauseOrDispose { }
     }
+    val rootDenied = stringResource(Res.string.updates_root_unavailable)
+    val shizukuMissing = stringResource(Res.string.updates_shizuku_unavailable)
+    val shizukuDenied = stringResource(Res.string.updates_shizuku_denied)
 
     val notificationPermissionLauncher =
         rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
@@ -209,6 +231,51 @@ fun UpdatesScreen(
                             AppSettings.shared.updateChannel = if (enabled) UPDATE_CHANNEL_NIGHTLY else UPDATE_CHANNEL_STABLE
                             nightlyBuilds = enabled
                             scope.launch { AppUpdateManager.check(context) }
+                        },
+                    ),
+                    listChooserSettingsItem(
+                        title = stringResource(Res.string.updates_install_method),
+                        description = stringResource(Res.string.updates_install_method_desc),
+                        options = UpdateInstallMethod.entries,
+                        selectedOption = installMethod,
+                        optionToString = { method ->
+                            stringResource(
+                                when (method) {
+                                    UpdateInstallMethod.SYSTEM -> Res.string.updates_install_method_system
+                                    UpdateInstallMethod.ROOT -> Res.string.updates_install_method_root
+                                    UpdateInstallMethod.SHIZUKU -> Res.string.updates_install_method_shizuku
+                                },
+                            )
+                        },
+                        onOptionSelected = { method ->
+                            scope.launch {
+                                when (AppUpdateManager.selectInstallMethod(context, method)) {
+                                    PrivilegedAccess.GRANTED -> {
+                                        installMethod = method
+                                    }
+
+                                    PrivilegedAccess.UNAVAILABLE -> {
+                                        Toast.makeText(context, shizukuMissing, Toast.LENGTH_SHORT).show()
+                                    }
+
+                                    PrivilegedAccess.DENIED -> {
+                                        val message = if (method == UpdateInstallMethod.ROOT) rootDenied else shizukuDenied
+                                        Toast.makeText(context, message, Toast.LENGTH_SHORT).show()
+                                    }
+                                }
+                                canAutoInstall = AppUpdateManager.canInstallWithoutPrompt(context)
+                            }
+                        },
+                    ),
+                    switchSettingsItem(
+                        title = stringResource(Res.string.updates_auto_install),
+                        description = stringResource(Res.string.updates_auto_install_desc),
+                        wrapTitle = true,
+                        checked = autoInstall && canAutoInstall,
+                        enabled = canAutoInstall,
+                        onCheckedChange = { enabled ->
+                            AppSettings.shared.autoInstallUpdates = enabled
+                            autoInstall = enabled
                         },
                     ),
                     switchSettingsItem(
@@ -403,7 +470,7 @@ fun UpdateDetailsScreen(
     val installPermissionLauncher =
         rememberLauncherForActivityResult(ActivityResultContracts.StartActivityForResult()) {
             installAfterPermission?.let { downloaded ->
-                if (AppUpdateManager.canInstallPackages(context)) {
+                if (AppUpdateManager.canInstallPackages(context, crashRecovery)) {
                     scope.launch { installerError = !AppUpdateManager.install(context, downloaded, crashRecovery) }
                     installAfterPermission = null
                 }
@@ -412,7 +479,7 @@ fun UpdateDetailsScreen(
 
     fun install(downloaded: AppUpdateState.Downloaded) {
         installerError = false
-        if (AppUpdateManager.canInstallPackages(context)) {
+        if (AppUpdateManager.canInstallPackages(context, crashRecovery)) {
             scope.launch { installerError = !AppUpdateManager.install(context, downloaded, crashRecovery) }
         } else {
             installAfterPermission = downloaded
@@ -431,7 +498,8 @@ fun UpdateDetailsScreen(
 
     LaunchedEffect(state) {
         val downloaded = state as? AppUpdateState.Downloaded ?: return@LaunchedEffect
-        if (!autoInstallHandled && !downloaded.installing) {
+        // A background download installs only once playback stops, so opening this screen must not install it.
+        if (!autoInstallHandled && !downloaded.installing && !AppUpdateManager.isBackgroundUpdate(downloaded.release)) {
             autoInstallHandled = true
             install(downloaded)
         }
@@ -550,20 +618,48 @@ fun UpdateDetailsScreen(
                 }
 
                 current is AppUpdateState.Error -> {
-                    Button(
-                        onClick = {
-                            scope.launch {
-                                if (release == null || current.failure == UpdateFailure.CHECK) {
-                                    AppUpdateManager.check(context, crashRecovery = crashRecovery)
-                                } else {
-                                    AppUpdateManager.download(context, release, crashRecovery)
-                                }
+                    Column(Modifier.background(MaterialTheme.colorScheme.surface)) {
+                        if (release != null && current.failure == UpdateFailure.DIGEST) {
+                            OutlinedButton(
+                                onClick = {
+                                    scope.launch {
+                                        AppUpdateManager.download(
+                                            context,
+                                            release,
+                                            crashRecovery,
+                                            skipVerification = true,
+                                        )
+                                    }
+                                },
+                                modifier =
+                                    Modifier
+                                        .fillMaxWidth()
+                                        .padding(start = 16.dp, end = 16.dp, top = 12.dp)
+                                        .heightIn(min = 56.dp),
+                                shapes = ButtonDefaults.shapes(),
+                            ) {
+                                Text(
+                                    stringResource(
+                                        if (crashRecovery) Res.string.crash_updates_force_install else Res.string.updates_force_install,
+                                    ),
+                                )
                             }
-                        },
-                        modifier = buttonModifier,
-                        shapes = ButtonDefaults.shapes(),
-                    ) {
-                        Text(stringResource(if (crashRecovery) Res.string.crash_updates_retry else Res.string.updates_retry))
+                        }
+                        Button(
+                            onClick = {
+                                scope.launch {
+                                    if (release == null || current.failure != UpdateFailure.DOWNLOAD) {
+                                        AppUpdateManager.check(context, crashRecovery = crashRecovery)
+                                    } else {
+                                        AppUpdateManager.download(context, release, crashRecovery)
+                                    }
+                                }
+                            },
+                            modifier = buttonModifier,
+                            shapes = ButtonDefaults.shapes(),
+                        ) {
+                            Text(stringResource(if (crashRecovery) Res.string.crash_updates_retry else Res.string.updates_retry))
+                        }
                     }
                 }
 
@@ -580,90 +676,97 @@ fun UpdateDetailsScreen(
             }
         },
     ) { paddingValues ->
-        Column(
-            modifier =
-                Modifier
-                    .fillMaxSize()
-                    .padding(paddingValues)
-                    .verticalScroll(rememberScrollState())
-                    .padding(horizontal = 16.dp, vertical = 8.dp),
-            verticalArrangement = Arrangement.spacedBy(16.dp),
+        PullToRefreshBox(
+            isRefreshing = current is AppUpdateState.Checking,
+            onRefresh = { scope.launch { AppUpdateManager.check(context, crashRecovery = crashRecovery) } },
+            modifier = Modifier.fillMaxSize().padding(paddingValues),
+            // The linear progress indicator below already shows the check.
+            indicator = {},
         ) {
-            Text(title, style = MaterialTheme.typography.headlineLarge)
+            Column(
+                modifier =
+                    Modifier
+                        .fillMaxSize()
+                        .verticalScroll(rememberScrollState())
+                        .padding(horizontal = 16.dp, vertical = 8.dp),
+                verticalArrangement = Arrangement.spacedBy(16.dp),
+            ) {
+                Text(title, style = MaterialTheme.typography.headlineLarge)
 
-            if (installing || current is AppUpdateState.Checking) {
-                Column(horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    if (current is AppUpdateState.Downloading) {
-                        LinearWavyProgressIndicator(progress = { current.progress / 100f }, modifier = Modifier.fillMaxWidth())
-                    } else {
-                        LinearWavyProgressIndicator(modifier = Modifier.fillMaxWidth())
-                    }
-                    if (installing) {
-                        Text(
-                            text =
-                                stringResource(
-                                    if (crashRecovery) {
-                                        Res.string.crash_updates_installing_description
-                                    } else {
-                                        Res.string.updates_installing_description
-                                    },
-                                ),
-                            style = MaterialTheme.typography.labelMedium,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            textAlign = TextAlign.Center,
-                        )
+                if (installing || current is AppUpdateState.Checking) {
+                    Column(horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        if (current is AppUpdateState.Downloading) {
+                            LinearWavyProgressIndicator(progress = { current.progress / 100f }, modifier = Modifier.fillMaxWidth())
+                        } else {
+                            LinearWavyProgressIndicator(modifier = Modifier.fillMaxWidth())
+                        }
+                        if (installing) {
+                            Text(
+                                text =
+                                    stringResource(
+                                        if (crashRecovery) {
+                                            Res.string.crash_updates_installing_description
+                                        } else {
+                                            Res.string.updates_installing_description
+                                        },
+                                    ),
+                                style = MaterialTheme.typography.labelMedium,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                textAlign = TextAlign.Center,
+                            )
+                        }
                     }
                 }
-            }
 
-            if (installerError) {
-                Text(
-                    text =
-                        stringResource(
-                            if (crashRecovery) Res.string.crash_updates_installer_failed else Res.string.updates_installer_failed,
-                        ),
-                    color = MaterialTheme.colorScheme.error,
-                )
-            }
+                if (installerError) {
+                    Text(
+                        text =
+                            stringResource(
+                                if (crashRecovery) Res.string.crash_updates_installer_failed else Res.string.updates_installer_failed,
+                            ),
+                        color = MaterialTheme.colorScheme.error,
+                    )
+                }
 
-            if (release == null) {
-                UpdateInfo(
-                    version = AppUpdateManager.currentVersion,
-                    versionLabel = stringResource(if (crashRecovery) Res.string.crash_updates_version else Res.string.updates_version),
-                    details =
-                        listOf(
-                            stringResource(if (crashRecovery) Res.string.crash_updates_last_check else Res.string.updates_last_check) to
-                                (
-                                    if (crashRecovery) {
-                                        (state as? AppUpdateState.UpToDate)?.checkedAt ?: 0L
-                                    } else {
-                                        AppSettings.shared.lastUpdateCheckTimestamp
-                                    }
-                                ).takeIf { it > 0 }
-                                    ?.let { DateFormat.getTimeInstance(DateFormat.SHORT).format(Date(it)) }
-                                    .orEmpty(),
-                        ),
-                )
-            } else {
-                UpdateInfo(
-                    version = release.version,
-                    versionLabel = stringResource(if (crashRecovery) Res.string.crash_updates_version else Res.string.updates_version),
-                    details =
-                        listOf(
-                            stringResource(if (crashRecovery) Res.string.crash_updates_size else Res.string.updates_size) to
-                                release.apk
-                                    ?.size
-                                    ?.let(fileSizeFormatter)
-                                    .orEmpty(),
-                            stringResource(if (crashRecovery) Res.string.crash_updates_date else Res.string.updates_date) to
-                                release.publishedAt?.substringBefore('T').orEmpty(),
-                        ),
-                )
-                Text(
-                    stringResource(if (crashRecovery) Res.string.crash_updates_changelog else Res.string.updates_changelog),
-                    style = MaterialTheme.typography.headlineLarge,
-                )
-                GitHubMarkdown(release.body.orEmpty())
+                if (release == null) {
+                    UpdateInfo(
+                        version = AppUpdateManager.currentVersion,
+                        versionLabel = stringResource(if (crashRecovery) Res.string.crash_updates_version else Res.string.updates_version),
+                        details =
+                            listOf(
+                                stringResource(if (crashRecovery) Res.string.crash_updates_last_check else Res.string.updates_last_check) to
+                                    (
+                                        if (crashRecovery) {
+                                            (state as? AppUpdateState.UpToDate)?.checkedAt ?: 0L
+                                        } else {
+                                            AppSettings.shared.lastUpdateCheckTimestamp
+                                        }
+                                    ).takeIf { it > 0 }
+                                        ?.let { DateFormat.getTimeInstance(DateFormat.SHORT).format(Date(it)) }
+                                        .orEmpty(),
+                            ),
+                    )
+                } else {
+                    UpdateInfo(
+                        version = release.version,
+                        versionLabel = stringResource(if (crashRecovery) Res.string.crash_updates_version else Res.string.updates_version),
+                        details =
+                            listOf(
+                                stringResource(if (crashRecovery) Res.string.crash_updates_size else Res.string.updates_size) to
+                                    release.apk
+                                        ?.size
+                                        ?.let(fileSizeFormatter)
+                                        .orEmpty(),
+                                stringResource(if (crashRecovery) Res.string.crash_updates_date else Res.string.updates_date) to
+                                    release.publishedAt?.substringBefore('T').orEmpty(),
+                            ),
+                    )
+                    Text(
+                        stringResource(if (crashRecovery) Res.string.crash_updates_changelog else Res.string.updates_changelog),
+                        style = MaterialTheme.typography.headlineLarge,
+                    )
+                    GitHubMarkdown(release.body.orEmpty())
+                }
             }
         }
     }

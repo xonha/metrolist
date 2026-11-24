@@ -33,6 +33,7 @@ import io.ktor.client.plugins.HttpTimeout
 import io.ktor.client.request.headers
 import io.ktor.client.request.prepareGet
 import io.ktor.client.statement.bodyAsChannel
+import io.ktor.http.HttpHeaders
 import io.ktor.http.HttpStatusCode
 import io.ktor.http.isSuccess
 import io.ktor.utils.io.jvm.javaio.toInputStream
@@ -173,7 +174,7 @@ internal data class HttpByteRange(
 )
 
 internal fun parseHttpByteRange(value: String?): HttpByteRange? {
-    val match = Regex("^bytes (\\d+)-(\\d+)/(\\d+)$").matchEntire(value ?: return null) ?: return null
+    val match = Regex("^(?i:bytes) (\\d+)-(\\d+)/(\\d+)$").matchEntire(value ?: return null) ?: return null
     val start = match.groupValues[1].toLongOrNull() ?: return null
     val end = match.groupValues[2].toLongOrNull() ?: return null
     val total = match.groupValues[3].toLongOrNull() ?: return null
@@ -285,8 +286,7 @@ object DownloadManager {
         _downloadStates.value =
             loaded
                 .filter { entry ->
-                    isValidSongId(entry.songId) &&
-                        safePersistedFile(entry.audioFilePath)?.let { it.isFile && it.length() >= MIN_AUDIO_BYTES } == true
+                    isValidSongId(entry.songId) && availableDownloadAudio(entry) != null
                 }.associate { it.songId to DownloadState.DOWNLOADED }
         scope.launch {
             database?.let {
@@ -329,7 +329,10 @@ object DownloadManager {
         return truncateUtf8(sanitized, MAX_AUDIO_BASE_NAME_BYTES)
     }
 
-    private fun reserveM4aDestination(song: SongItem): File {
+    private fun reserveAudioDestination(
+        song: SongItem,
+        extension: String,
+    ): File {
         val artist = song.artists.joinToString(", ") { it.name }
         val baseName = buildAudioBaseName(song.title, artist, song.id)
         val idSuffix = song.id.take(8)
@@ -340,7 +343,7 @@ object DownloadManager {
                     1 -> " [$idSuffix]"
                     else -> " [$idSuffix-$attempt]"
                 }
-            val candidate = fileInDownloadDir("$baseName$suffix.m4a")
+            val candidate = fileInDownloadDir("$baseName$suffix.$extension")
             try {
                 Files.createFile(candidate.toPath())
                 return candidate
@@ -562,6 +565,12 @@ object DownloadManager {
                             if (response.status.value == 403 || response.status.value == 410) {
                                 throw IOException("HTTP ${response.status.value}: Stream URL expired")
                             }
+                            if (!isImage &&
+                                response.status == HttpStatusCode.ServiceUnavailable &&
+                                response.headers[HttpHeaders.RetryAfter] == null
+                            ) {
+                                throw IOException("HTTP 503: Audio temporarily unavailable")
+                            }
                             return@execute null
                         }
                         val range =
@@ -640,10 +649,10 @@ object DownloadManager {
 
     private fun getDownloadMetadata(songId: String): DownloadedFile? = _downloadedFiles.value.find { it.songId == songId }
 
-    fun getLocalAudioPath(songId: String): String? =
-        getDownloadMetadata(songId)?.let { metadata ->
-            safePersistedFile(metadata.audioFilePath)?.takeIf { it.isFile && it.length() >= MIN_AUDIO_BYTES }?.absolutePath
-        }
+    internal fun availableDownloadAudio(metadata: DownloadedFile): File? =
+        safePersistedFile(metadata.audioFilePath)?.takeIf { it.isFile && it.length() >= MIN_AUDIO_BYTES }
+
+    fun getLocalAudioPath(songId: String): String? = getDownloadMetadata(songId)?.let(::availableDownloadAudio)?.absolutePath
 
     suspend fun getLocalPlaybackResource(
         songId: String,
@@ -673,11 +682,16 @@ object DownloadManager {
         return resolver.resolveRemote(song.id, hints, resolveAudioQuality(), sourceSong = song, refresh = refresh)
     }
 
+    private var playlistDownloadOwnershipRevision = 0L
+
     fun downloadPlaylist(
         playlistId: String,
         songs: List<SongItem>,
     ) {
-        synchronized(metadataLock) { DownloadedPlaylists.track(playlistId) }
+        synchronized(metadataLock) {
+            DownloadedPlaylists.track(playlistId)
+            playlistDownloadOwnershipRevision++
+        }
         downloadAll(songs)
     }
 
@@ -685,18 +699,48 @@ object DownloadManager {
         playlistId: String,
         songs: List<SongItem>,
     ) {
-        synchronized(metadataLock) { DownloadedPlaylists.stop(playlistId) }
+        synchronized(metadataLock) {
+            DownloadedPlaylists.stop(playlistId)
+            playlistDownloadOwnershipRevision++
+        }
         scope.launch {
-            val retainedIds = retainedPlaylistDownloadIds() ?: return@launch
-            deleteDownloads(songs.map(SongItem::id).filterNot { it in retainedIds })
+            try {
+                repeat(3) {
+                    val (owners, revision) =
+                        synchronized(metadataLock) { DownloadedPlaylists.ids() to playlistDownloadOwnershipRevision }
+                    val retainedIds = retainedPlaylistDownloadIds(owners) ?: return@launch
+                    val ids =
+                        songs
+                            .map(SongItem::id)
+                            .filterNot { it in retainedIds }
+                            .filter(::isValidSongId)
+                            .toSet()
+                    val removed =
+                        withContext(Dispatchers.IO) {
+                            synchronized(metadataLock) {
+                                coroutineContext.ensureActive()
+                                if (playlistDownloadOwnershipRevision != revision || DownloadedPlaylists.ids() != owners) {
+                                    false
+                                } else {
+                                    if (ids.isNotEmpty()) deleteStoredDownloads(ids)
+                                    true
+                                }
+                            }
+                        }
+                    if (removed) return@launch
+                }
+            } catch (error: CancellationException) {
+                throw error
+            } catch (error: Exception) {
+                AppLogger.error("DownloadManager", "Failed to delete playlist downloads", error)
+            }
         }
     }
 
-    private suspend fun retainedPlaylistDownloadIds(): Set<String>? {
+    private suspend fun retainedPlaylistDownloadIds(owners: Set<String>): Set<String>? {
         val activeDatabase = database ?: return null
         return try {
-            DownloadedPlaylists
-                .ids()
+            owners
                 .flatMap { DownloadedPlaylists.songs(it, activeDatabase) }
                 .mapTo(mutableSetOf(), SongItem::id)
         } catch (error: CancellationException) {
@@ -723,8 +767,10 @@ object DownloadManager {
         valid.forEach { download(it) }
     }
 
+    internal fun isDownloadableSong(song: SongItem): Boolean = !song.isUnavailable && !song.isLocal && isValidSongId(song.id)
+
     fun download(song: SongItem) {
-        if (song.isUnavailable || song.isLocal || !isValidSongId(song.id) || isDownloaded(song.id)) return
+        if (!isDownloadableSong(song) || isDownloaded(song.id)) return
         val job =
             scope.launch(start = CoroutineStart.LAZY) {
                 var audioPath: String? = null
@@ -791,20 +837,42 @@ object DownloadManager {
                             ?: throw IOException("Failed to download audio after $maxRetries attempts")
                         val sourceFile =
                             safePersistedFile(audioPath) ?: throw IOException("Downloaded source file is unavailable")
-                        val destination = reserveM4aDestination(song)
-                        try {
-                            transcodeSemaphore.withPermit {
-                                AudioDownloadTranscoder.transcodeToM4a(sourceFile, destination, song) { progress ->
-                                    coroutineContext.ensureActive()
-                                    updateProgress(song.id, 0.7f + progress * 0.29f)
-                                }
-                            }
-                            audioPath = destination.absolutePath
-                            runCatching { Files.deleteIfExists(sourceFile.toPath()) }
-                        } catch (e: Throwable) {
-                            destination.delete()
-                            throw e
+                        val onConvertProgress: (Float) -> Unit = { progress ->
+                            coroutineContext.ensureActive()
+                            updateProgress(song.id, 0.7f + progress * 0.29f)
                         }
+                        val copied =
+                            try {
+                                AudioDownloadTranscoder.streamCopy(
+                                    sourceFile,
+                                    song,
+                                    { reserveAudioDestination(song, it) },
+                                    onConvertProgress,
+                                )
+                            } catch (e: CancellationException) {
+                                throw e
+                            } catch (e: Exception) {
+                                AppLogger.error("DownloadManager", "Stream copy failed for ${song.id}, transcoding instead", e)
+                                null
+                            }
+                        val storedMimeType =
+                            if (copied != null) {
+                                audioPath = copied.file.absolutePath
+                                copied.mimeType
+                            } else {
+                                val destination = reserveAudioDestination(song, "m4a")
+                                try {
+                                    transcodeSemaphore.withPermit {
+                                        AudioDownloadTranscoder.transcodeToM4a(sourceFile, destination, song, onConvertProgress)
+                                    }
+                                    audioPath = destination.absolutePath
+                                } catch (e: Throwable) {
+                                    destination.delete()
+                                    throw e
+                                }
+                                "audio/mp4"
+                            }
+                        runCatching { Files.deleteIfExists(sourceFile.toPath()) }
 
                         database?.let { db -> db.withDatabaseTransaction { db.dao().upsertHistorySong(song) } }
                         val entry =
@@ -820,7 +888,7 @@ object DownloadManager {
                                 album = song.album?.name,
                                 year = song.year,
                                 sourceUrl = "https://music.youtube.com/watch?v=${song.id}",
-                                mimeType = "audio/mp4",
+                                mimeType = storedMimeType,
                                 explicitness = song.artworkExplicitness,
                                 loudnessDb = downloadedResource?.loudnessDb,
                                 perceptualLoudnessDb = downloadedResource?.perceptualLoudnessDb,

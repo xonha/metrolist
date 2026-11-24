@@ -53,6 +53,8 @@ import com.metrolist.shared.generated.resources.playlist_add_uncertain
 import com.metrolist.shared.generated.resources.playlist_create_action
 import com.metrolist.shared.generated.resources.sign_in
 import com.metrolist.shared.generated.resources.sign_in_to_add_playlists
+import com.metrolist.shared.model.PlaylistItem
+import com.metrolist.shared.model.exactSongCount
 import com.metrolist.shared.model.sortedForPlaylistPicker
 import com.metrolist.shared.settings.HiddenLibraryItem
 import com.metrolist.shared.settings.HiddenLibraryItems
@@ -80,24 +82,30 @@ fun AddToPlaylistDialog() {
             val hiddenKeys = HiddenLibraryItems.keys()
             PlayerState.userPlaylists.filterNot { HiddenLibraryItem.from(it).key in hiddenKeys }
         }
+    val songCounts = remember(playlists) { playlists.associate { it.id to it.exactSongCount } }
     val sort = Settings.shared.playlistPickerSort
     val direction = Settings.shared.playlistPickerSortDirection
     val librarySorting = Settings.shared.librarySorting(LibraryFilterType.PLAYLISTS)
     val manualOrder = Settings.shared.libraryManualOrder
+    // Saved online playlists are not editable while signed out; they follow the selectable ones and only show membership.
+    val readOnlyIds = remember(playlists) { playlists.filterNot(PlaylistItem::isEditable).mapTo(mutableSetOf()) { it.id } }
     val sortedPlaylists =
         remember(playlists, sort, direction, librarySorting, manualOrder) {
-            playlists.sortedForPlaylistPicker(
-                sort,
-                direction,
-                name = { it.title },
-                addedAt = { it.libraryAddedAt },
-                lastUpdated = { it.libraryUpdatedAt },
-                songCount = { it.songCount?.toIntOrNull() },
-                id = { it.id },
-                librarySorting = librarySorting,
-                manualOrder = manualOrder,
-                playtime = { it.playtime },
-            )
+            val (selectable, readOnly) = playlists.partition(PlaylistItem::isEditable)
+            listOf(selectable, readOnly).flatMap { group ->
+                group.sortedForPlaylistPicker(
+                    sort,
+                    direction,
+                    name = { it.title },
+                    addedAt = { it.libraryAddedAt },
+                    lastUpdated = { it.libraryUpdatedAt },
+                    songCount = { songCounts[it.id] },
+                    id = { it.id },
+                    librarySorting = librarySorting,
+                    manualOrder = manualOrder,
+                    playtime = { it.playtime },
+                )
+            }
         }
     var selectedIds by remember(songs) { mutableStateOf(emptySet<String>()) }
     var completedIds by remember(songs) { mutableStateOf(emptySet<String>()) }
@@ -142,12 +150,13 @@ fun AddToPlaylistDialog() {
                             id = playlist.id,
                             title = playlist.title,
                             artwork = libraryArtwork(playlist.id, playlist.thumbnail, playlist.customThumbnail),
-                            songCount = playlist.songCount?.toIntOrNull(),
+                            songCount = songCounts[playlist.id],
                             author = playlist.author,
                         )
                     },
                 membership = membership,
                 disabledIds = membership,
+                readOnlyIds = readOnlyIds,
                 onDismiss = ::dismiss,
                 onChoosePlaylist = { id ->
                     selectedIds = if (id in selectedIds) selectedIds - id else selectedIds + id
@@ -166,7 +175,7 @@ fun AddToPlaylistDialog() {
                         playlistIds =
                             sortedPlaylists
                                 .filter {
-                                    it.id in selectedIds && it.id !in completedIds && it.id !in membership
+                                    it.id in selectedIds && it.id !in completedIds && it.id !in membership && it.id !in readOnlyIds
                                 }.map { it.id },
                         songs = songs,
                         onPlaylistAdded = { id ->

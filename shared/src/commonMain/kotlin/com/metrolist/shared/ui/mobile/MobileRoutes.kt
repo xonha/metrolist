@@ -11,6 +11,7 @@ import com.metrolist.shared.model.YTItem
 import com.metrolist.shared.ui.components.CollectionPreviews
 import com.metrolist.shared.ui.navigation.Screen
 import com.metrolist.shared.ui.settings.SettingsPageId
+import com.metrolist.shared.utils.parseYouTubePodcastId
 import io.ktor.http.URLProtocol
 import io.ktor.http.Url
 
@@ -30,6 +31,8 @@ internal sealed interface MobileRoute {
     data object History : MobileRoute
 
     data object Statistics : MobileRoute
+
+    data object Wrapped : MobileRoute
 
     data object Integrations : MobileRoute
 
@@ -174,8 +177,19 @@ private fun partyInvitation(code: String?): MobileDeepLink? =
         MobileDeepLink.Destination(MobileRoute.ListenTogether(it.uppercase()))
     }
 
+internal fun resolveMobilePodcastBrowseLink(value: String): MobileRoute.Podcast? {
+    val link = value.trim()
+    if (link.startsWith("metrolist://", ignoreCase = true)) {
+        // Explicit app routes keep their own destination/id; "open" just wraps a media link.
+        val path = link.substringAfter("://").trimStart('/').substringBefore('?')
+        if (!path.equals("open", ignoreCase = true)) return null
+    }
+    return parseYouTubePodcastId(link)?.let { MobileRoute.Podcast(it) }
+}
+
 internal fun resolveMobileDeepLink(callback: String): MobileDeepLink? {
     parseListenTogetherInvitation(callback)?.let { return MobileDeepLink.Destination(MobileRoute.ListenTogether(it)) }
+    resolveMobilePodcastBrowseLink(callback)?.let { return MobileDeepLink.Destination(it) }
     val uri = runCatching { Url(callback.replace("metrolist://", "https://app.metrolist/")) }.getOrNull()
     val path = uri?.encodedPath?.trim('/') ?: callback.removePrefix("metrolist://").substringBefore('?').trim('/')
     if (!callback.startsWith("metrolist://")) {
@@ -200,8 +214,7 @@ internal fun resolveMobileDeepLink(callback: String): MobileDeepLink? {
         }
 
         "party" -> {
-            val code = uri?.parameters?.get("r") ?: uri?.parameters?.get("code") ?: path.removePrefix("party/").substringBefore('/')
-            partyInvitation(code)
+            partyInvitation(uri?.parameters?.get("r") ?: uri?.parameters?.get("code"))
         }
 
         "home" -> {
@@ -338,6 +351,7 @@ internal val MobileRoute.motionScreen: Screen
             is MobileRoute.Settings -> Screen.Settings
             MobileRoute.History -> Screen.History
             MobileRoute.Statistics -> Screen.Statistics
+            MobileRoute.Wrapped -> Screen.Wrapped
             MobileRoute.Integrations -> Screen.Integrations
             is MobileRoute.ListenTogether -> Screen.ListenTogether
             is MobileRoute.Login -> if (isSwitchingChannel) Screen.SwitchChannel else Screen.Login

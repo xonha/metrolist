@@ -43,6 +43,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import com.metrolist.desktop.state.app.AppState
@@ -212,8 +213,17 @@ fun FullscreenContentLayout(
 private fun LyricsSection(textSizeMultiplier: Float = 1.2f) {
     val colorScheme = MaterialTheme.colorScheme
     val isSolid = Settings.shared.playerBackgroundStyle == PlayerBackgroundStyle.SOLID
+    val lightLiquid =
+        Settings.shared.playerBackgroundStyle == PlayerBackgroundStyle.LIQUID && colorScheme.surface.luminance() >= 0.5f
     val lyricsTextColor by animateColorAsState(
-        targetValue = if (isSolid) colorScheme.onSurface else Color.White,
+        targetValue =
+            if (isSolid) {
+                colorScheme.onSurface
+            } else if (lightLiquid) {
+                Color.Black
+            } else {
+                Color.White
+            },
         label = "LyricsSectionTextColor",
     )
     Column(modifier = Modifier.fillMaxSize()) {
@@ -286,6 +296,7 @@ internal fun DesktopLyricsContent(
                 title = track.title,
                 artist = track.artists.joinToString { it.name },
                 artworkUrl = PlayerState.currentArtworkUrl,
+                isLocal = track.isLocal,
                 exportLabel = saveTitle,
                 onExport = { saveImage(it, saveTitle, filename) },
                 onShareText = AppState::copyToClipboard,

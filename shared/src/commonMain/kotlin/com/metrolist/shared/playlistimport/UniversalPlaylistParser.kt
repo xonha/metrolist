@@ -8,6 +8,10 @@ import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.jsonPrimitive
 
+internal const val M3U_LITERAL_TITLE_COMMENT = "#METROLIST:TITLE-ONLY"
+internal const val M3U_ARTIST_LENGTH_COMMENT_PREFIX = "#METROLIST:ARTIST-LENGTH:"
+internal const val M3U_ARTIST_TITLE_SEPARATOR = " - "
+
 object UniversalPlaylistParser {
     private val json =
         Json {
@@ -15,7 +19,9 @@ object UniversalPlaylistParser {
             isLenient = true
         }
 
-    private val numberingRegex = Regex("""^\s*(?:\[\d+]|\d+[\.\-\):\s]+)\s*""")
+    // A separator between two digits is part of titles like 4:44, not a list marker.
+    private val numberingRegex = Regex("""^\s*(?:\[\d+]|\d+(?![.\-:]\d)[\.\-\):\s]+)\s*""")
+    private val pathFileExtensionRegex = Regex("""\.[A-Za-z0-9]+$""")
     private val bareYoutubeIdRegex = Regex("[A-Za-z0-9_-]{11}")
     private val youtubeHosts = setOf("youtube.com", "www.youtube.com", "m.youtube.com", "music.youtube.com", "youtu.be")
 
@@ -66,12 +72,22 @@ object UniversalPlaylistParser {
         source: String,
         resolveLocalReference: (String) -> String? = { null },
     ): ImportedPlaylistData {
+        val extension = fileName.substringAfterLast('.').lowercase()
         val trimmed = text.removePrefix("\uFEFF").trimStart()
-        val explicitCsv = fileName.substringAfterLast('.').lowercase() in setOf("csv", "tsv")
+        if (extension == "m3u" || extension == "m3u8") {
+            if (text.length > PlaylistImportManager.MAX_CSV_CHARACTERS) throw ImportException(ImportErrorKey.FileReadFailed)
+            return ImportedPlaylistData(title = title, source = source, tracks = parseM3u(trimmed, resolveLocalReference))
+        }
+        val explicitCsv = extension == "csv" || extension == "tsv"
         val structured =
             trimmed.startsWith("{") || trimmed.startsWith("[") || trimmed.startsWith("#EXTM3U", true) ||
                 trimmed.contains("#EXTINF:", true)
-        val csv = if (explicitCsv || (!structured && text.any { it in ",;\t" })) CsvPlaylist.parse(text) else null
+        val csv =
+            if (explicitCsv || (!structured && text.any { it in ",;\t" })) {
+                CsvPlaylist.parse(text, preferTabs = extension == "tsv")
+            } else {
+                null
+            }
         val needsMapping = explicitCsv || (csv?.columnCount ?: 0) > 1
         if (needsMapping && csv?.rows.orEmpty().none { row -> row.any(String::isNotBlank) }) {
             throw ImportException(ImportErrorKey.NoTracksRecognized)
@@ -87,27 +103,32 @@ object UniversalPlaylistParser {
     private fun parseJson(
         text: String,
         resolveLocalReference: (String) -> String?,
-    ): List<PlaylistImportManager.CsvTrack>? =
-        try {
-            val root = json.parseToJsonElement(text)
-            val items =
-                when (root) {
-                    is JsonArray -> root
-                    is JsonObject -> root["tracks"] ?: root["songs"] ?: root["items"] ?: root["data"]
-                    else -> null
-                } as? JsonArray ?: return null
+    ): List<PlaylistImportManager.CsvTrack>? {
+        val tracks =
+            try {
+                val root = json.parseToJsonElement(text)
+                val items =
+                    when (root) {
+                        is JsonArray -> root
+                        is JsonObject -> root["tracks"] ?: root["songs"] ?: root["items"] ?: root["data"]
+                        else -> null
+                    } as? JsonArray ?: return null
 
-            val tracks =
-                items
-                    .mapNotNull { element ->
-                        (element as? JsonObject)?.let { extractTrackFromJsonObject(it, resolveLocalReference) }
-                    }.take(PlaylistImportManager.MAX_PLAYLIST_TRACKS)
-            // Lenient JSON also accepts plain titles such as [Intro], which are not track objects.
-            if (tracks.isEmpty() && items.any { it !is JsonObject && it != JsonNull }) return null
-            tracks
-        } catch (_: Exception) {
-            null
-        }
+                val tracks =
+                    items
+                        .asSequence()
+                        .mapNotNull { element ->
+                            (element as? JsonObject)?.let { extractTrackFromJsonObject(it, resolveLocalReference) }
+                        }.take(PlaylistImportManager.MAX_PLAYLIST_TRACKS + 1)
+                        .toList()
+                // Lenient JSON also accepts plain titles such as [Intro], which are not track objects.
+                if (tracks.isEmpty() && items.any { it !is JsonObject && it != JsonNull }) return null
+                tracks
+            } catch (_: Exception) {
+                return null
+            }
+        return tracks.checkTrackLimit()
+    }
 
     private fun extractTrackFromJsonObject(
         obj: JsonObject,
@@ -173,12 +194,33 @@ object UniversalPlaylistParser {
         resolveLocalReference: (String) -> String?,
     ): List<PlaylistImportManager.CsvTrack> {
         val results = mutableListOf<PlaylistImportManager.CsvTrack>()
-        var pendingInfo: String? = null
+        var pendingInfo: Pair<String, String>? = null
+        var literalNextLabel = false
+        var nextArtistLength: Int? = null
         for (line in text.lineSequence()) {
+            // Artist length belongs to the immediately following EXTINF, not later tracks.
+            val artistLength = nextArtistLength
+            nextArtistLength = null
             val trimmed = line.trim()
             if (trimmed.isBlank()) continue
             if (trimmed.startsWith("#EXTINF:", ignoreCase = true)) {
-                pendingInfo = trimmed.substringAfter(',').trim().takeIf { ',' in trimmed && it.isNotBlank() }
+                pendingInfo =
+                    trimmed
+                        .substringAfter(',')
+                        .trim()
+                        .takeIf { ',' in trimmed && it.isNotBlank() }
+                        ?.let { label ->
+                            if (literalNextLabel) "" to label else splitM3uDisplayLabel(label, artistLength)
+                        }
+                literalNextLabel = false
+                continue
+            }
+            if (trimmed.startsWith(M3U_ARTIST_LENGTH_COMMENT_PREFIX)) {
+                nextArtistLength = trimmed.removePrefix(M3U_ARTIST_LENGTH_COMMENT_PREFIX).toIntOrNull()
+                continue
+            }
+            if (trimmed == M3U_LITERAL_TITLE_COMMENT) {
+                literalNextLabel = true
                 continue
             }
             if (trimmed.startsWith("#")) continue
@@ -186,9 +228,10 @@ object UniversalPlaylistParser {
             val videoId = extractVideoId(trimmed)
             val directReference = if (videoId == null) resolveDirectReference(trimmed, resolveLocalReference) else null
             val fallbackTitle = referenceTitle(trimmed)
-            val suppliedInfo = pendingInfo?.let(::splitArtistAndTitle)
+            val suppliedInfo = pendingInfo
             val (artist, title) = suppliedInfo ?: ("" to fallbackTitle)
             pendingInfo = null
+            literalNextLabel = false
             if (title.isNotBlank() || videoId != null || directReference != null) {
                 results +=
                     PlaylistImportManager.CsvTrack(
@@ -200,7 +243,7 @@ object UniversalPlaylistParser {
                         customTitle = suppliedInfo?.second?.takeIf(String::isNotBlank),
                     )
             }
-            if (results.size >= PlaylistImportManager.MAX_PLAYLIST_TRACKS) break
+            if (results.size > PlaylistImportManager.MAX_PLAYLIST_TRACKS) throw ImportException(ImportErrorKey.TooManyTracks)
         }
         return results
     }
@@ -218,17 +261,20 @@ object UniversalPlaylistParser {
             .lineSequence()
             .map(String::trim)
             .filter { it.isNotBlank() && !it.startsWith("#") && !it.startsWith("//") }
-            .take(PlaylistImportManager.MAX_PLAYLIST_TRACKS)
             .mapNotNull { line ->
                 val cleaned = numberingRegex.replace(line, "").trim()
                 if (cleaned.isBlank()) return@mapNotNull null
                 val videoId = extractVideoId(cleaned)
+                val (labelArtist, labelTitle) = splitArtistAndTitle(cleaned)
                 val directReference =
-                    cleaned.takeIf { videoId == null && looksLikeDirectReference(it) }?.let {
-                        resolveDirectReference(it, resolveLocalReference)
-                    }
+                    cleaned
+                        .takeIf { videoId == null && looksLikeDirectReference(it) }
+                        ?.let { resolveDirectReference(it, resolveLocalReference) }
+                        ?.takeUnless { (_, resolved) ->
+                            !resolved && labelArtist.isNotBlank() && labelTitle.isNotBlank() && isAmbiguousSlashLabel(cleaned)
+                        }
                 val (artist, title) =
-                    if (directReference == null) splitArtistAndTitle(cleaned) else "" to referenceTitle(cleaned)
+                    if (directReference == null) labelArtist to labelTitle else "" to referenceTitle(cleaned)
                 if (title.isBlank() && videoId == null && directReference == null) return@mapNotNull null
                 PlaylistImportManager.CsvTrack(
                     title.ifBlank { cleaned },
@@ -238,7 +284,19 @@ object UniversalPlaylistParser {
                     directReference?.second == true,
                     customTitle = title.takeIf { videoId == null && directReference == null && it.isNotBlank() },
                 )
-            }.toList()
+            }.take(PlaylistImportManager.MAX_PLAYLIST_TRACKS + 1)
+            .toList()
+            .checkTrackLimit()
+
+    // An artist or title can contain a slash; only favor the label if the reference has no stronger path signal.
+    private fun isAmbiguousSlashLabel(value: String): Boolean =
+        '/' in value && '\\' !in value && !value.startsWith('/') && !value.startsWith('.') &&
+            uriScheme(value) == null && !pathFileExtensionRegex.containsMatchIn(value.substringAfterLast('/'))
+
+    private fun List<PlaylistImportManager.CsvTrack>.checkTrackLimit(): List<PlaylistImportManager.CsvTrack> {
+        if (size > PlaylistImportManager.MAX_PLAYLIST_TRACKS) throw ImportException(ImportErrorKey.TooManyTracks)
+        return this
+    }
 
     private fun resolveDirectReference(
         value: String,
@@ -265,6 +323,19 @@ object UniversalPlaylistParser {
             .ifBlank { value }
     }
 
+    internal fun splitM3uDisplayLabel(
+        label: String,
+        artistLength: Int? = null,
+    ): Pair<String, String> {
+        val separator = M3U_ARTIST_TITLE_SEPARATOR
+        if (artistLength != null && artistLength in 1 until label.length - separator.length &&
+            label.startsWith(separator, startIndex = artistLength)
+        ) {
+            return label.substring(0, artistLength).trim() to label.substring(artistLength + separator.length).trim()
+        }
+        return splitArtistAndTitleOn(label, separator) ?: splitArtistAndTitle(label)
+    }
+
     internal fun splitArtistAndTitle(line: String): Pair<String, String> {
         val trimmed = line.trim()
         val byMatch = Regex("""^(?:["'“](.+?)["'”]|(.+?))\s+by\s+(.+)$""", RegexOption.IGNORE_CASE).find(trimmed)
@@ -278,13 +349,19 @@ object UniversalPlaylistParser {
             if (title.isNotBlank() && artist.isNotBlank()) return artist to title
         }
         for (separator in listOf(" - ", " – ", " — ", " : ", " | ")) {
-            val index = trimmed.indexOf(separator)
-            if (index > 0 && index + separator.length < trimmed.length) {
-                return trimmed.substring(0, index).trim().trim('"', '\'', '“', '”') to
-                    trimmed.substring(index + separator.length).trim().trim('"', '\'', '“', '”')
-            }
+            splitArtistAndTitleOn(trimmed, separator)?.let { return it }
         }
         return "" to trimmed.trim('"', '\'', '“', '”')
+    }
+
+    private fun splitArtistAndTitleOn(
+        line: String,
+        separator: String,
+    ): Pair<String, String>? {
+        val index = line.indexOf(separator)
+        if (index <= 0 || index + separator.length >= line.length) return null
+        return line.substring(0, index).trim().trim('"', '\'', '“', '”') to
+            line.substring(index + separator.length).trim().trim('"', '\'', '“', '”')
     }
 
     internal fun extractVideoId(input: String): String? {

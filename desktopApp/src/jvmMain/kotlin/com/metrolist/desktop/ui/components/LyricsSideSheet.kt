@@ -38,11 +38,13 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.Dp
@@ -66,6 +68,7 @@ import com.metrolist.shared.ui.navigation.navigationPopupSource
 import com.metrolist.shared.ui.player.PlayerGradientBackground
 import com.metrolist.shared.ui.theme.getGradientColors
 import com.metrolist.shared.ui.utils.ArtworkBlurStyle
+import kotlinx.coroutines.delay
 import org.jetbrains.compose.resources.stringResource
 
 @Composable
@@ -110,6 +113,9 @@ internal fun DesktopLyricsContent(
     val activeSeedColor = UiState.seedColor
 
     val isImmersiveBg = Settings.shared.playerBackgroundStyle != PlayerBackgroundStyle.SOLID
+    val isLightLiquidBg =
+        Settings.shared.playerBackgroundStyle == PlayerBackgroundStyle.LIQUID && colorScheme.surface.luminance() >= 0.5f
+    val immersiveForeground = if (isLightLiquidBg) Color.Black else Color.White
 
     val textBackgroundColor by animateColorAsState(
         targetValue =
@@ -117,8 +123,9 @@ internal fun DesktopLyricsContent(
                 PlayerBackgroundStyle.BLURRED_ARTWORK,
                 PlayerBackgroundStyle.GRADIENT,
                 PlayerBackgroundStyle.ANIMATED_GRADIENT,
-                PlayerBackgroundStyle.LIQUID,
                 -> Color.White
+
+                PlayerBackgroundStyle.LIQUID -> immersiveForeground
 
                 PlayerBackgroundStyle.SOLID -> colorScheme.onSurface
             },
@@ -127,17 +134,26 @@ internal fun DesktopLyricsContent(
 
     val headerBg =
         if (isImmersiveBg) {
-            Color.White.copy(alpha = 0.14f)
+            immersiveForeground.copy(alpha = 0.14f)
         } else {
             colorScheme.surfaceContainerHigh
         }
-    val headerTextColor = if (isImmersiveBg) Color.White else colorScheme.onSurface
-    val headerIconTint = if (isImmersiveBg) Color.White.copy(alpha = 0.85f) else colorScheme.onSurfaceVariant
+    val headerTextColor = if (isImmersiveBg) immersiveForeground else colorScheme.onSurface
+    val headerIconTint = if (isImmersiveBg) immersiveForeground.copy(alpha = 0.85f) else colorScheme.onSurfaceVariant
 
     Surface(
         modifier = modifier.fillMaxHeight(),
         shape = RoundedCornerShape(16.dp),
-        color = if (isImmersiveBg) Color.Black else colorScheme.surface,
+        color =
+            if (isImmersiveBg) {
+                if (isLightLiquidBg) {
+                    Color.White
+                } else {
+                    Color.Black
+                }
+            } else {
+                colorScheme.surface
+            },
         tonalElevation = 1.dp,
     ) {
         val drawerContent = @Composable {
@@ -154,6 +170,7 @@ internal fun DesktopLyricsContent(
                     artworkUrl = PlayerState.currentArtworkUrl.takeIf { hasArtwork },
                     artworkScrimAlpha = 0.45f,
                     isLiquid = style == PlayerBackgroundStyle.LIQUID,
+                    foregroundColor = textBackgroundColor,
                 )
             }
             Column(modifier = Modifier.fillMaxSize()) {
@@ -275,6 +292,11 @@ internal fun DesktopLyricsContent(
             }
         }
 
+        // Keep the background moving until a covering player or video has finished its entry transition.
+        val backgroundActive by produceState(isVisible, isVisible) {
+            if (!isVisible) delay(COVER_TRANSITION_SETTLE_MS)
+            value = isVisible
+        }
         Box(modifier = Modifier.fillMaxSize()) {
             when (Settings.shared.playerBackgroundStyle) {
                 PlayerBackgroundStyle.GRADIENT -> {
@@ -287,7 +309,7 @@ internal fun DesktopLyricsContent(
                     PlayerGradientBackground(
                         getGradientColors(activeSeedColor),
                         animate = true,
-                        active = PlayerState.isPlaying,
+                        active = PlayerState.isPlaying && backgroundActive,
                     ) {
                         drawerContent()
                     }
@@ -317,7 +339,7 @@ internal fun DesktopLyricsContent(
                     LiquidBackground(
                         artworkUrl = PlayerState.currentArtworkUrl,
                         isPlaying = PlayerState.isPlaying,
-                        visible = true,
+                        visible = backgroundActive,
                     )
                     drawerContent()
                 }
@@ -331,3 +353,5 @@ internal fun DesktopLyricsContent(
         }
     }
 }
+
+private const val COVER_TRANSITION_SETTLE_MS = 500L

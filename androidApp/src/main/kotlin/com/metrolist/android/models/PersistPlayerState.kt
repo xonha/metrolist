@@ -45,12 +45,14 @@ data class PersistPlayerState(
     val radioQueueSeedSongId: String? = null,
     val radioQueueFinite: Boolean? = null,
     val radioQueue: Boolean = false,
+    val explicitRadioQueue: Boolean? = null,
     val queueSessionId: Long? = null,
     val radioQueueChips: List<PersistRadioQueueChip> = emptyList(),
     val radioQueueSelectedChipId: String? = null,
     val radioQueueContinuation: String? = null,
     val radioQueuePlaylistId: String? = null,
     val radioQueueParams: String? = null,
+    val radioQueueExplicitFeed: Boolean? = null,
     val revision: String? = null,
 ) : java.io.Serializable
 
@@ -61,12 +63,16 @@ internal class PlaybackPersistenceWriter(
     class Request internal constructor(
         internal val revision: Long,
         internal val state: PersistPlayerState?,
+        internal val clear: Boolean,
     )
 
     private val lock = Any()
     private val revision = AtomicLong()
 
-    fun request(state: PersistPlayerState?): Request = Request(revision.incrementAndGet(), state)
+    // A null state is a skipped checkpoint; only requestClear discards the saved queue.
+    fun request(state: PersistPlayerState?): Request = Request(revision.incrementAndGet(), state, clear = false)
+
+    fun requestClear(): Request = Request(revision.incrementAndGet(), state = null, clear = true)
 
     private var lastState: PersistPlayerState? = null
     private var lastCheckpoint: PlayerPositionCheckpoint? = null
@@ -74,14 +80,14 @@ internal class PlaybackPersistenceWriter(
     fun write(request: Request) {
         synchronized(lock) {
             if (request.revision != revision.get()) return
-            val state = request.state
-            if (state == null) {
+            if (request.clear) {
                 writeStoredValue("")
                 writePosition("")
                 lastState = null
                 lastCheckpoint = null
                 return
             }
+            val state = request.state ?: return
             val previous = lastState
             val sameQueue =
                 if (state.queueSnapshot != null) {
