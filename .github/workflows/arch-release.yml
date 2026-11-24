@@ -1,6 +1,8 @@
 name: Release Arch package
 
 on:
+  push:
+    tags: ['arch-*']
   workflow_dispatch:
 
 permissions:
@@ -11,7 +13,7 @@ concurrency:
 
 jobs:
   package:
-    if: startsWith(github.ref, 'refs/heads/release/')
+    if: startsWith(github.ref, 'refs/tags/arch-')
     runs-on: ubuntu-24.04
     container: archlinux:base-devel
     timeout-minutes: 60
@@ -25,11 +27,12 @@ jobs:
           submodules: recursive
           persist-credentials: false
 
-      - name: Verify release branch version
+      - name: Verify release tag version
         shell: bash
         run: |
           version=$(sed -n 's/^appVersion=//p' gradle.properties)
-          test "$GITHUB_REF_NAME" = "release/$version"
+          revision=$(sed -n 's/^pkgrel=//p' packaging/arch/PKGBUILD)
+          test "$GITHUB_REF_NAME" = "arch-$version-$revision"
 
       - name: Set up Temurin JDK 25
         uses: actions/setup-java@b843ebf9b913146b38da2eaa7aeddf76074ae1ad # v6
@@ -100,6 +103,6 @@ jobs:
           version=${packages[0]#metrolist-omarchy-bin-}
           version=${version%-x86_64.pkg.tar.zst}
           gh release create "arch-$version" "${packages[0]}" SHA256SUMS \
-            --target "$GITHUB_SHA" \
+            --verify-tag \
             --title "Metrolist for Arch $version" \
             --notes "Prebuilt x86_64 Arch package from this fork. Install or upgrade with \`sudo pacman -U ${packages[0]}\`. The package conflicts with metrolist-desktop-bin and metrolist-git."
