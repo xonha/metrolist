@@ -25,7 +25,7 @@ The desktop build is written to `desktopApp/build/compose/binaries/main-release/
 
 ## Publish an Arch package
 
-Run [Release Arch package](https://github.com/xonha/metrolist/actions/workflows/arch-release.yml) from the default branch. The workflow builds the x86_64 package and publishes it with `SHA256SUMS`. Increment `pkgrel` in the [Arch recipe](packaging/arch/PKGBUILD) for packaging changes within the same upstream version.
+Run [Release Arch package](https://github.com/xonha/metrolist/actions/workflows/arch-release.yml) from the matching version branch, such as `release/14.0.1`. The workflow builds the x86_64 package and publishes it with `SHA256SUMS`. Increment `pkgrel` in the [Arch recipe](packaging/arch/PKGBUILD) for packaging changes within the same upstream version.
 
 ## Upstream and license
 
