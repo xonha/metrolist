@@ -4,7 +4,7 @@ A personal fork of [Metrolist](https://github.com/MetrolistGroup/Metrolist) that
 
 ## Install or update
 
-Download the `.pkg.tar.zst` file from this fork's [GitHub Releases](https://github.com/xonha/app.metrolist/releases), then install it with pacman.
+Download the `.pkg.tar.zst` file from this fork's [GitHub Releases](https://github.com/xonha/metrolist/releases), then install it with pacman.
 
 ```sh
 sudo pacman -U ./metrolist-omarchy-bin-14.0.1-1-x86_64.pkg.tar.zst
@@ -25,7 +25,7 @@ The desktop build is written to `desktopApp/build/compose/binaries/main-release/
 
 ## Publish an Arch package
 
-Run [Release Arch package](https://github.com/xonha/app.metrolist/actions/workflows/arch-release.yml) from the default branch. The workflow builds the x86_64 package and publishes it with `SHA256SUMS`. Increment `pkgrel` in the [Arch recipe](packaging/arch/PKGBUILD) for packaging changes within the same upstream version.
+Run [Release Arch package](https://github.com/xonha/metrolist/actions/workflows/arch-release.yml) from the default branch. The workflow builds the x86_64 package and publishes it with `SHA256SUMS`. Increment `pkgrel` in the [Arch recipe](packaging/arch/PKGBUILD) for packaging changes within the same upstream version.
 
 ## Upstream and license
 

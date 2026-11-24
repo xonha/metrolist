@@ -5,7 +5,7 @@ pkgver=$(sed -n 's/^appVersion=//p' "$_project_dir/gradle.properties")
 pkgrel=1
 pkgdesc='Metrolist desktop client with Omarchy compatibility'
 arch=('x86_64')
-url='https://github.com/xonha/app.metrolist'
+url='https://github.com/xonha/metrolist'
 license=('GPL-3.0-only')
 depends=('alsa-lib' 'dbus' 'fontconfig' 'gtk3' 'hicolor-icon-theme' 'libglvnd' 'libsecret' 'libxi' 'libxrender' 'libxtst' 'webkit2gtk-4.1')
 provides=('metrolist')
