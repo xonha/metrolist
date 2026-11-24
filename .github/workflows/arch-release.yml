@@ -1,0 +1,99 @@
+name: Release Arch package
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: arch-release-${{ github.ref }}
+
+jobs:
+  package:
+    runs-on: ubuntu-24.04
+    container: archlinux:base-devel
+    timeout-minutes: 60
+    steps:
+      - name: Install Arch build tools
+        run: pacman -Syu --needed --noconfirm git jdk21-openjdk
+
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          submodules: recursive
+          persist-credentials: false
+
+      - name: Set up Temurin JDK 25
+        uses: actions/setup-java@b843ebf9b913146b38da2eaa7aeddf76074ae1ad # v6
+        with:
+          distribution: temurin
+          java-version: '25'
+
+      - name: Build Arch package
+        shell: bash
+        run: |
+          set -euo pipefail
+          useradd --create-home --shell /bin/bash builder
+          mkdir -p "$GITHUB_WORKSPACE/build/arch-tmp" "$GITHUB_WORKSPACE/dist"
+          chown -R builder:builder "$GITHUB_WORKSPACE"
+          cd packaging/arch
+          runuser -u builder -- env -u CI \
+            JAVA_HOME="$JAVA_HOME" PATH="$JAVA_HOME/bin:/usr/bin" \
+            GRADLE_OPTS="-Dorg.gradle.java.installations.paths=$JAVA_HOME,/usr/lib/jvm/java-21-openjdk" \
+            JAVA_TOOL_OPTIONS="-Djava.io.tmpdir=$GITHUB_WORKSPACE/build/arch-tmp" \
+            TMPDIR="$GITHUB_WORKSPACE/build/arch-tmp" \
+            PKGDEST="$GITHUB_WORKSPACE/dist" \
+            makepkg --nodeps --noconfirm --noprogress
+
+      - name: Verify package metadata and launcher
+        shell: bash
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          packages=(dist/*.pkg.tar.zst)
+          test "${#packages[@]}" -eq 1
+          package="${packages[0]}"
+          bsdtar -xOf "$package" .PKGINFO | grep -Fx 'pkgname = metrolist-omarchy-bin'
+          bsdtar -tf "$package" usr/bin/metrolist usr/share/applications/Metrolist.desktop opt/metrolist/bin/Metrolist
+          cd dist
+          sha256sum -- *.pkg.tar.zst > SHA256SUMS
+
+      - name: Upload package
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: arch-x86_64
+          path: dist/
+          if-no-files-found: error
+
+  publish:
+    needs: package
+    if: github.ref_name == github.event.repository.default_branch
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - name: Download verified package
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
+        with:
+          name: arch-x86_64
+          path: dist
+
+      - name: Publish GitHub release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          cd dist
+          sha256sum -c SHA256SUMS
+          shopt -s nullglob
+          packages=(metrolist-omarchy-bin-*-x86_64.pkg.tar.zst)
+          test "${#packages[@]}" -eq 1
+          version=${packages[0]#metrolist-omarchy-bin-}
+          version=${version%-x86_64.pkg.tar.zst}
+          gh release create "arch-$version" "${packages[0]}" SHA256SUMS \
+            --target "$GITHUB_SHA" \
+            --title "Metrolist for Arch $version" \
+            --notes "Prebuilt x86_64 Arch package from this fork. Install or upgrade with \`sudo pacman -U ${packages[0]}\`. The package conflicts with metrolist-desktop-bin and metrolist-git."

@@ -1,6 +1,10 @@
 ## PLUNZ fork
 
-PLUNZ maintains this independent fork of [Metrolist](https://github.com/MetrolistGroup/Metrolist) under the [GNU GPL 3.0](LICENSE). It is based on upstream v14.0.1 and allows the desktop app to start on Omarchy. The change follows the compatibility [patch proposed for Omarchy](https://github.com/omacom/omarchy-pkgs/pull/3371/files) by TripleU613.
+This is an independent fork of [Metrolist](https://github.com/MetrolistGroup/Metrolist) under the [GNU GPL 3.0](LICENSE). It is based on upstream v14.0.1 and allows the desktop app to start on Omarchy. The change follows the compatibility [patch proposed for Omarchy](https://github.com/omacom/omarchy-pkgs/pull/3371/files) by TripleU613.
+
+Download the x86_64 `.pkg.tar.zst` package from this fork's [GitHub Releases](https://github.com/xonha/app.metrolist/releases). Install or upgrade it with `sudo pacman -U <downloaded-file.pkg.tar.zst>`. The package conflicts with the upstream Arch packages and pacman will prompt before replacing one.
+
+Run the **Release Arch package** workflow from the default branch to publish a new package. Increment `pkgrel` in [the Arch recipe](packaging/arch/PKGBUILD) for packaging updates within the same upstream version.
 
 To build the Linux desktop distribution, use JDK 25 and run these commands from this checkout.
 

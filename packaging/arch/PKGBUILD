@@ -1,0 +1,30 @@
+# Packaging based on the upstream aur/PKGBUILD maintained by Metrolist contributors.
+pkgname=metrolist-omarchy-bin
+_project_dir="$startdir/../.."
+pkgver=$(sed -n 's/^appVersion=//p' "$_project_dir/gradle.properties")
+pkgrel=1
+pkgdesc='Metrolist desktop client with Omarchy compatibility'
+arch=('x86_64')
+url='https://github.com/xonha/app.metrolist'
+license=('GPL-3.0-only')
+depends=('alsa-lib' 'dbus' 'fontconfig' 'gtk3' 'hicolor-icon-theme' 'libglvnd' 'libsecret' 'libxi' 'libxrender' 'libxtst' 'webkit2gtk-4.1')
+provides=('metrolist')
+conflicts=('metrolist' 'metrolist-desktop-bin' 'metrolist-git')
+options=('!strip' '!debug')
+
+build() {
+  cd "$_project_dir"
+  ./gradlew --no-daemon :desktopApp:createReleaseDistributable
+}
+
+package() {
+  cd "$_project_dir"
+  local appdir='desktopApp/build/compose/binaries/main-release/app/Metrolist'
+  test -x "$appdir/bin/Metrolist"
+  install -d "$pkgdir/opt/metrolist" "$pkgdir/usr/bin"
+  cp -a "$appdir/." "$pkgdir/opt/metrolist/"
+  ln -s /opt/metrolist/bin/Metrolist "$pkgdir/usr/bin/metrolist"
+  install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+  install -Dm644 desktopApp/src/desktopMain/resources/logo.png "$pkgdir/usr/share/icons/hicolor/512x512/apps/metrolist.png"
+  install -Dm644 aur/metrolist.desktop "$pkgdir/usr/share/applications/Metrolist.desktop"
+}
