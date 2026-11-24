@@ -1,3 +1,16 @@
+## PLUNZ fork
+
+PLUNZ maintains this independent fork of [Metrolist](https://github.com/MetrolistGroup/Metrolist) under the [GNU GPL 3.0](LICENSE). It is based on upstream v14.0.1 and allows the desktop app to start on Omarchy. The change follows the compatibility [patch proposed for Omarchy](https://github.com/omacom/omarchy-pkgs/pull/3371/files) by TripleU613.
+
+To build the Linux desktop distribution, use JDK 25 and run these commands from this checkout.
+
+```sh
+git submodule update --init --recursive
+./gradlew :desktopApp:createReleaseDistributable
+```
+
+The distribution is written to `desktopApp/build/compose/binaries/main-release/app/Metrolist`. See the [desktop build documentation](docs/desktop.md) for platform dependencies. Download links below point to official upstream releases, which still enforce the Omarchy startup check.
+
 <div style="display: flex; gap: 1rem;">
   <img src="fastlane/metadata/android/en-US/images/icon.png" alt="Metrolist app icon" width="200" height="200" />
   <div>
